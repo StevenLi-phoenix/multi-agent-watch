@@ -1,0 +1,17 @@
+{
+  "name": "multi-agent-watch",
+  "version": "0.1.0",
+  "description": "Detect and notify when multiple Claude Code sessions are working on the same repository concurrently. Surfaces collisions via terminal banner, desktop notification, and Claude context injection.",
+  "author": {
+    "name": "Shuyu Li",
+    "email": "lishuyustevenli@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": [
+    "hooks",
+    "multi-agent",
+    "collision-detection",
+    "notifications",
+    "session-tracking"
+  ]
+}
