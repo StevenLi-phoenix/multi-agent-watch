@@ -5,6 +5,9 @@
 set -uo pipefail
 export MW_HOOK=SessionStart
 
+# Don't let the detached summarizer's own `claude` recurse into our hooks.
+[ -n "${MW_SUMMARY_CHILD:-}" ] && exit 0
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/registry.sh
 source "$SCRIPT_DIR/../lib/registry.sh" || exit 0
@@ -35,7 +38,8 @@ others_count="$(printf '%s' "$others_json" | jq 'length' 2>/dev/null || echo 0)"
 
 if [ "${others_count:-0}" -gt 0 ]; then
   summary="$(printf '%s' "$others_json" | jq -r '
-    map("  - session=\(.session_id[0:8]) host=\(.host) pid=\(.pid) cwd=\(.cwd) started=\(.started_at) hb=\(.last_heartbeat)")
+    map("  - session=\(.session_id[0:8]) host=\(.host) pid=\(.pid) cwd=\(.cwd) started=\(.started_at) hb=\(.last_heartbeat)"
+        + (if (.summary // "") != "" then "\n      doing: \(.summary)" else "" end))
     | join("\n")
   ' 2>/dev/null || printf '  (unparseable)')"
 

@@ -3,6 +3,9 @@
 set -uo pipefail
 export MW_HOOK=SessionEnd
 
+# Don't let the detached summarizer's own `claude` recurse into our hooks.
+[ -n "${MW_SUMMARY_CHILD:-}" ] && exit 0
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/registry.sh
 source "$SCRIPT_DIR/../lib/registry.sh" || exit 0

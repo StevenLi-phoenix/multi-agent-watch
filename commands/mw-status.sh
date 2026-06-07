@@ -28,7 +28,8 @@ jq -s '
         host: .host,
         pid: .pid,
         started_at: .started_at,
-        last_heartbeat: .last_heartbeat
+        last_heartbeat: .last_heartbeat,
+        summary: (.summary // "")
       })
     })
   | sort_by(-.count)
@@ -36,5 +37,24 @@ jq -s '
   .[] |
   (if .count > 1 then "!! COLLISION" else "ok           " end) as $marker |
   "\($marker) [\(.count)] \(.repo)\n" +
-  (.sessions | map("    - \(.session_id) host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)") | join("\n"))
+  (.sessions | map("    - \(.session_id) host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
+     + (if .summary != "" then "\n        doing: \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
 '
+
+# Pending (undelivered) messages, grouped by recipient.
+shopt -s nullglob
+pending=("$MW_MESSAGES_DIR"/*/*.json)
+shopt -u nullglob
+if [ ${#pending[@]} -gt 0 ]; then
+  echo
+  echo "pending messages (not yet delivered):"
+  for d in "$MW_MESSAGES_DIR"/*/; do
+    [ -d "$d" ] || continue
+    shopt -s nullglob
+    m=("$d"*.json)
+    shopt -u nullglob
+    [ ${#m[@]} -eq 0 ] && continue
+    rid="$(basename "$d")"
+    echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting"
+  done
+fi
