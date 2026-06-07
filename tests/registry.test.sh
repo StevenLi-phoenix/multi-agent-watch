@@ -124,6 +124,41 @@ MW_SUMMARY_REFRESH=1 mw_generate_summary "sum-1" "$tt"
 ok "refresh mode re-calls"   '[ "$(wc -l < "$calls" | tr -d " ")" = "2" ]'
 unset MW_CLAUDE_BIN
 
+echo "== subscriptions: watch / notify-on-summary-change / leave / auto-unsub =="
+rm -f "$MW_SESSIONS_DIR"/*.json
+rm -rf "$MW_MESSAGES_DIR"/*
+mw_write_session "watcher-1" "/repo/w" "" m
+mw_write_session "target-1"  "/repo/w" "" m
+ok "self-watch refused"      '! mw_add_watch target-1 target-1'
+ok "watch missing target -> 1" '! mw_add_watch watcher-1 nope-9'
+mw_add_watch "watcher-1" "target-1"
+ok "watcher recorded"        '[ "$(mw_watchers target-1)" = "watcher-1" ]'
+ok "watch is idempotent"     'mw_add_watch watcher-1 target-1; [ "$(mw_watchers target-1 | wc -l | tr -d " ")" = "1" ]'
+
+# summary change notifies the watcher
+export MW_CLAUDE_BIN="$TMP/fake-claude"   # reuse stub from earlier
+mw_generate_summary "target-1" "$tt"
+ok "summary-change pinged watcher" '[ "$(mw_inbox_count watcher-1)" -ge 1 ]'
+ok "ping mentions target"          'mw_drain_inbox watcher-1 | grep -q "target-1"'
+unset MW_CLAUDE_BIN
+
+# unsubscribe
+mw_remove_watch "watcher-1" "target-1"
+ok "unsubscribed"            '[ -z "$(mw_watchers target-1)" ]'
+
+# target leaving pings the watcher
+mw_add_watch "watcher-1" "target-1"
+mw_remove_session "target-1"
+ok "target gone"            '[ ! -f "$MW_SESSIONS_DIR/target-1.json" ]'
+ok "leave pinged watcher"   'mw_drain_inbox watcher-1 | grep -q "ended"'
+
+# SessionEnd of a watcher auto-unsubscribes it everywhere
+mw_write_session "target-2" "/repo/w" "" m
+mw_add_watch "watcher-1" "target-2"
+ok "watching target-2"      '[ "$(mw_watchers target-2)" = "watcher-1" ]'
+mw_remove_session "watcher-1"      # watcher leaves
+ok "auto-unsub on leave"    '[ -z "$(mw_watchers target-2)" ]'
+
 echo "----------------------------------------"
 echo "$pass passed, $fail failed"
 rm -rf "$TMP"

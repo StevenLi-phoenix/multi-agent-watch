@@ -15,9 +15,23 @@ source "$SCRIPT_DIR/../lib/registry.sh" || { echo "mw-send: cannot load registry
 mw_init
 mw_purge_stale
 
-to_spec="${1:-}"
-shift || true
-text="${*:-}"
+# Accept two calling shapes:
+#   - separate args:  mw-send.sh <to> <message words...>   (direct / Bash tool)
+#   - one blob arg:   mw-send.sh "<to> <message...>"        (slash command, where
+#     the .md wraps "$ARGUMENTS" in quotes so zsh won't glob/split the message —
+#     non-ASCII and glob chars like * ? [ no longer trigger `no matches found`).
+# In the blob case we split recipient (first token) from message here, in-script.
+to_spec=""
+text=""
+if [ "$#" -ge 2 ]; then
+  to_spec="$1"; shift; text="$*"
+elif [ "$#" -eq 1 ]; then
+  to_spec="${1%%[[:space:]]*}"
+  case "$1" in
+    *[[:space:]]*) text="${1#*[[:space:]]}" ;;
+    *) text="" ;;
+  esac
+fi
 from_sid="${CLAUDE_CODE_SESSION_ID:-unknown}"
 from_cwd="$(pwd)"
 repo_key="$(mw_repo_key "$from_cwd")"

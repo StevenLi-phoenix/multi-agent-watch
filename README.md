@@ -30,6 +30,12 @@ messages for another running session.
 - `all` broadcasts to every other session on your repo (you are excluded). A prefix targets specific session(s).
 - Sender identity comes from `$CLAUDE_CODE_SESSION_ID`.
 
+### Subscriptions (watch a session)
+- `/mw-watch <session-id-prefix>` subscribes you to another session. While subscribed you get a message (delivered through the same monitor drain) when that session **changes its self-summary** or **ends**.
+- `/mw-watch --list` shows who you're watching; `/mw-watch --stop <prefix>` unsubscribes.
+- Watchers are stored on the watched session's entry and fan out on summary-change / removal (including stale-purge). Subscriptions **auto-clear on SessionEnd** and dead watchers are pruned lazily.
+- Turns polling into push — e.g. waiting for a sibling to finish a prerequisite instead of re-reading a coordination file.
+
 ## Install
 
 This plugin ships via a local directory marketplace. The source lives in your
@@ -40,8 +46,9 @@ auto-registered from `hooks/hooks.json`.
 
 ## Slash commands
 
-- `/mw-status` — list all registered sessions grouped by repo, flagging collisions; shows each session's self-summary and any pending (undelivered) messages.
+- `/mw-status` — list all registered sessions grouped by repo, flagging collisions; shows each session's self-summary, watcher count, and any pending (undelivered) messages.
 - `/mw-send <to> <message>` — leave a message for another session (`<to>` is an 8-char session-id prefix or `all`).
+- `/mw-watch <to>` / `/mw-watch --list` / `/mw-watch --stop <to>` — subscribe to a session's summary-change / end events.
 
 ## Config (env vars)
 
@@ -81,5 +88,6 @@ generation against a stubbed `claude`.
 
 ## Changelog
 
+- **0.2.1** — fix `/mw-send` slash quoting so non-ASCII / glob-char messages no longer trip zsh `no matches found` (message passed as one quoted blob, recipient split in-script); `mw_write_session` now merges onto the existing entry so `summary` / `watchers` / `known_others` survive heartbeat rewrites. Adds subscriptions (`/mw-watch`): get pinged when a watched session changes its summary or ends, auto-unsubscribe on SessionEnd; `/mw-status` shows watcher counts.
 - **0.2.0** — atomic registry writes + safer stale-purge (never deletes a file caught mid-write); per-session `claude -p` self-summaries surfaced to siblings; direct inter-session messaging (`/mw-send`); `/mw-status` shows summaries and pending messages; unit + integration tests.
 - **0.1.0** — collision detection, monitor deltas, desktop notifications, `/mw-status`.

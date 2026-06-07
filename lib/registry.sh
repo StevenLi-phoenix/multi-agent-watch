@@ -77,7 +77,7 @@ mw_purge_stale() {
         mtime="$(mw_file_mtime "$f")"
         if [ $((now - mtime)) -gt "$MW_STALE_SEC" ]; then
           mw_log "purge corrupt (old): $f"
-          rm -f "$f"
+          mw_remove_session "$(basename "$f" .json)"
         else
           mw_log "skip corrupt (fresh, likely mid-write): $f"
         fi
@@ -85,7 +85,7 @@ mw_purge_stale() {
       *)
         if [ "$hb" -lt "$stale_threshold" ]; then
           mw_log "purge stale: $f hb=$hb threshold=$stale_threshold"
-          rm -f "$f"
+          mw_remove_session "$(basename "$f" .json)"  # notifies watchers it ended
         fi
         ;;
     esac
@@ -170,7 +170,10 @@ mw_set_known_others() {
 }
 
 mw_remove_session() {
-  rm -f "$MW_SESSIONS_DIR/$1.json"
+  local sid="$1"
+  mw_notify_watchers "$sid" "ended" "session closed — its files may be mid-change"
+  mw_unwatch_all "$sid"   # this session is no longer watching anyone
+  rm -f "$MW_SESSIONS_DIR/$sid.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -314,10 +317,11 @@ mw_run_claude() {
 # returns early if a summary already exists or the lock is held. Intended to be
 # invoked detached (see mw_spawn_summary / hooks/summarize.sh).
 mw_generate_summary() {
-  local sid="$1" tt="$2" digest prompt out
+  local sid="$1" tt="$2" digest prompt out stored prev
+  prev="$(mw_summary_value "$sid")"
   # Run-once by default: skip if we already have a summary. Set
   # MW_SUMMARY_REFRESH=1 to instead refresh on every Stop as work evolves.
-  [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$(mw_summary_value "$sid")" ] && return 0
+  [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$prev" ] && return 0
   mw_try_lock "summary-$sid" || return 0             # another run in flight
   digest="$(mw_transcript_digest "$tt" 2>/dev/null || printf '')"
   if [ -z "$digest" ]; then mw_unlock "summary-$sid"; return 0; fi
@@ -326,10 +330,69 @@ $digest"
   out="$( export MW_SUMMARY_CHILD=1 MW_QUIET=1; mw_run_claude "$prompt" )"
   out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g; s/^ *//; s/ *$//')"
   if [ -n "$out" ]; then
-    mw_set_summary "$sid" "${out:0:280}"
-    mw_log "summary set sid=$sid: ${out:0:80}"
+    stored="${out:0:280}"
+    mw_set_summary "$sid" "$stored"
+    mw_log "summary set sid=$sid: ${stored:0:80}"
+    # Notify subscribers only when the summary actually changed.
+    [ "$stored" != "$prev" ] && mw_notify_watchers "$sid" "updated" "${stored:0:200}"
   fi
   mw_unlock "summary-$sid"
+}
+
+# ---------------------------------------------------------------------------
+# Subscriptions: a session can WATCH another and get a message when the watched
+# session changes its summary or ends. Watchers are stored on the WATCHED
+# session's entry (.watchers[]) — preserved across heartbeats by the merge in
+# mw_write_session — so whoever changes/removes it can fan out. Delivery reuses
+# the inbox, so watch notifications surface through the same monitor drain.
+# ---------------------------------------------------------------------------
+
+mw_watchers() {
+  jq -r '(.watchers // [])[]' "$MW_SESSIONS_DIR/$1.json" 2>/dev/null || printf ''
+}
+
+# Subscribe watcher -> target. rc 1 if target missing or self-watch.
+mw_add_watch() {
+  local watcher="$1" target="$2" file="$MW_SESSIONS_DIR/$2.json"
+  [ "$watcher" = "$target" ] && return 1
+  [ -f "$file" ] || return 1
+  jq --arg w "$watcher" '.watchers = ((.watchers // []) + [$w] | unique)' "$file" 2>/dev/null \
+    | mw_atomic_write "$file"
+}
+
+# Unsubscribe watcher from a single target.
+mw_remove_watch() {
+  local watcher="$1" target="$2" file="$MW_SESSIONS_DIR/$2.json"
+  [ -f "$file" ] || return 0
+  jq --arg w "$watcher" '.watchers = ((.watchers // []) - [$w])' "$file" 2>/dev/null \
+    | mw_atomic_write "$file"
+}
+
+# Remove a watcher from EVERY session's watcher list (SessionEnd auto-unsub).
+mw_unwatch_all() {
+  local watcher="$1" f
+  shopt -s nullglob
+  for f in "$MW_SESSIONS_DIR"/*.json; do
+    if jq -e --arg w "$watcher" '((.watchers // []) | index($w)) != null' "$f" >/dev/null 2>&1; then
+      jq --arg w "$watcher" '.watchers = ((.watchers // []) - [$w])' "$f" 2>/dev/null | mw_atomic_write "$f"
+    fi
+  done
+  shopt -u nullglob
+}
+
+# Push a notification to every still-present watcher of <sid>; lazily prune
+# watchers whose session is gone. event/detail describe what happened.
+mw_notify_watchers() {
+  local sid="$1" event="$2" detail="$3" w tcwd
+  tcwd="$(jq -r '.cwd // ""' "$MW_SESSIONS_DIR/$sid.json" 2>/dev/null || printf '')"
+  while IFS= read -r w; do
+    [ -z "$w" ] && continue
+    if [ -f "$MW_SESSIONS_DIR/$w.json" ]; then
+      mw_send_message "$w" "watch:${sid:0:8}" "$tcwd" "🔔 watched session ${sid:0:8} ${event}: ${detail}"
+    else
+      mw_remove_watch "$w" "$sid"
+    fi
+  done <<< "$(mw_watchers "$sid")"
 }
 
 mw_notify_desktop() {

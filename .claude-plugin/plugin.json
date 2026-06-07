@@ -1,6 +1,6 @@
 {
   "name": "multi-agent-watch",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Detect when multiple Claude Code sessions work the same repo concurrently, and let them coordinate: per-session claude -p self-summaries surfaced to siblings, plus direct inter-session messaging. Collisions surfaced via terminal banner, desktop notification, and context injection.",
   "author": {
     "name": "Shuyu Li",

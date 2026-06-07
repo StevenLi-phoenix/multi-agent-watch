@@ -29,7 +29,8 @@ jq -s '
         pid: .pid,
         started_at: .started_at,
         last_heartbeat: .last_heartbeat,
-        summary: (.summary // "")
+        summary: (.summary // ""),
+        watchers: ((.watchers // []) | length)
       })
     })
   | sort_by(-.count)
@@ -38,6 +39,7 @@ jq -s '
   (if .count > 1 then "!! COLLISION" else "ok           " end) as $marker |
   "\($marker) [\(.count)] \(.repo)\n" +
   (.sessions | map("    - \(.session_id) host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
+     + (if .watchers > 0 then " (watched by \(.watchers))" else "" end)
      + (if .summary != "" then "\n        doing: \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
 '
 
