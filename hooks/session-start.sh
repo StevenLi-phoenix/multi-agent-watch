@@ -56,7 +56,7 @@ if [ "${others_count:-0}" -gt 0 ]; then
 
   mw_notify_desktop "Claude Code: multi-agent collision" "$short"
 
-  context="$(printf 'multi-agent-watch: %s other Claude Code session(s) are concurrently active in this repository (%s). Coordinate carefully — avoid stomping on changes from other sessions, prefer additive edits, and check `git status` before broad refactors. Active sessions:\n%s' "$others_count" "$repo_key" "$summary")"
+  context="$(printf 'multi-agent-watch: %s other Claude Code session(s) are concurrently active in this repository (%s).\n\nCoordination workflow — do NOT all pile into the same working directory:\n  1. ISOLATE (preferred): give each session its own git worktree — `git worktree add ../<name> -b <branch>` — so concurrent edits never touch the same files. This is the clean fix when everything feels chaotic.\n  2. SHARED-DIR fallback: if you stay in this directory, make additive edits only, never overwrite a file another session is mid-change on, and run `git status` before any broad refactor.\n  3. Commit or stash work-in-progress BEFORE restoring/overwriting any file — another session may have touched it.\n\nActive sessions:\n%s' "$others_count" "$repo_key" "$summary")"
 
   jq -n \
     --arg sm "multi-agent-watch: $short — see stderr for details" \

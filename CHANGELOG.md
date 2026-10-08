@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-02 — Cheaper, fresher summaries
+
+### Changed
+- Self-summaries now refresh on a period instead of running exactly once. When the Stop hook fires and the stored summary is older than `MW_SUMMARY_PERIOD` seconds (default 300), it re-summarizes so long-running sessions keep an up-to-date label. Within the period it still no-ops, so cost stays bounded. `MW_SUMMARY_REFRESH=1` forces a refresh; `MW_SUMMARY_PERIOD=0` always refreshes.
+  Files: lib/registry.sh
+- Summaries are now gated on the multi-agent-watch skill actually being loaded: the Stop hook only runs `claude -p` for sessions whose transcript shows a `/mw-*` command was used. Sessions that never engaged the plugin no longer pay the haiku call. Set `MW_SUMMARY_REQUIRE_SKILL=0` to restore unconditional summarizing.
+  Files: hooks/summarize.sh, lib/registry.sh (new `mw_skill_engaged`, `mw_summary_at_epoch`)
+
+### Tests
+- Added coverage for period expiry (stale → re-call, fresh → skip) and the skill-engaged gate.
+  Files: tests/registry.test.sh
+
 ## [0.2.1] - 2026-06-07 — Messaging quoting fix + subscriptions
 
 ### Added

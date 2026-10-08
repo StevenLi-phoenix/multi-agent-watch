@@ -11,10 +11,17 @@ MW_STALE_SEC="${MW_STALE_SEC:-600}"
 MW_QUIET="${MW_QUIET:-0}"
 
 # Session self-summary (so sibling sessions learn what each other is doing).
-# Generated exactly once per session via `claude -p --model <model>`.
+# Generated via `claude -p --model <model>`, refreshed every MW_SUMMARY_PERIOD
+# seconds so long-running sessions keep an up-to-date label (was run-once).
 MW_CLAUDE_BIN="${MW_CLAUDE_BIN:-claude}"
 MW_SUMMARY_MODEL="${MW_SUMMARY_MODEL:-haiku}"
 MW_SUMMARY_TIMEOUT="${MW_SUMMARY_TIMEOUT:-120}"
+# Re-summarize when the stored summary is older than this many seconds.
+# Set MW_SUMMARY_REFRESH=1 to force a refresh regardless of age.
+MW_SUMMARY_PERIOD="${MW_SUMMARY_PERIOD:-300}"
+# Only summarize sessions that actually engaged the multi-agent-watch skill
+# (ran a /mw-* command). Set to 0 to summarize every session unconditionally.
+MW_SUMMARY_REQUIRE_SKILL="${MW_SUMMARY_REQUIRE_SKILL:-1}"
 
 mw_init() {
   mkdir -p "$MW_SESSIONS_DIR" "$MW_MESSAGES_DIR" "$MW_LOCKS_DIR" 2>/dev/null || true
@@ -271,6 +278,25 @@ mw_summary_value() {
   jq -r '.summary // ""' "$MW_SESSIONS_DIR/$1.json" 2>/dev/null || printf ''
 }
 
+# Epoch seconds of the stored summary_at, or empty if never summarized.
+mw_summary_at_epoch() {
+  local iso
+  iso="$(jq -r '.summary_at // ""' "$MW_SESSIONS_DIR/$1.json" 2>/dev/null)"
+  [ -z "$iso" ] && return 0
+  # macOS/BSD date first, then GNU date.
+  date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" '+%s' 2>/dev/null \
+    || date -u -d "$iso" '+%s' 2>/dev/null || printf ''
+}
+
+# True (rc 0) if the transcript shows this session engaged the plugin — i.e.
+# ran a /mw-* command, so its slash-command skill was loaded. Empty transcript
+# or no match ⇒ rc 1 (skill never loaded).
+mw_skill_engaged() {
+  local tt="$1"
+  [ -n "$tt" ] && [ -f "$tt" ] || return 1
+  grep -q 'multi-agent-watch:mw-' "$tt" 2>/dev/null
+}
+
 mw_set_summary() {
   local sid="$1" text="$2" file="$MW_SESSIONS_DIR/$1.json"
   [ -f "$file" ] || return 0
@@ -319,9 +345,17 @@ mw_run_claude() {
 mw_generate_summary() {
   local sid="$1" tt="$2" digest prompt out stored prev
   prev="$(mw_summary_value "$sid")"
-  # Run-once by default: skip if we already have a summary. Set
-  # MW_SUMMARY_REFRESH=1 to instead refresh on every Stop as work evolves.
-  [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$prev" ] && return 0
+  # Period-based refresh: skip only if a summary exists AND is younger than
+  # MW_SUMMARY_PERIOD seconds. MW_SUMMARY_REFRESH=1 forces a refresh; a period
+  # of 0 also always refreshes.
+  if [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$prev" ] && [ "$MW_SUMMARY_PERIOD" -gt 0 ] 2>/dev/null; then
+    local at now
+    at="$(mw_summary_at_epoch "$sid")"
+    now="$(mw_now_epoch)"
+    if [ -n "$at" ] && [ $((now - at)) -lt "$MW_SUMMARY_PERIOD" ]; then
+      return 0
+    fi
+  fi
   mw_try_lock "summary-$sid" || return 0             # another run in flight
   digest="$(mw_transcript_digest "$tt" 2>/dev/null || printf '')"
   if [ -z "$digest" ]; then mw_unlock "summary-$sid"; return 0; fi

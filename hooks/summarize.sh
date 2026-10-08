@@ -3,9 +3,10 @@
 # `claude -p --model haiku` so sibling sessions can read what we're doing.
 #
 # Wired as an ASYNC Stop hook (see hooks.json) so the model call never blocks
-# the turn. It fires every Stop, but mw_generate_summary is run-once by default
-# (skips if a summary already exists), so `claude -p` actually executes only
-# once per session unless MW_SUMMARY_REFRESH=1 is set.
+# the turn. It fires every Stop, but only runs `claude -p` when (a) this session
+# has loaded the multi-agent-watch skill (ran a /mw-* command) and (b) the
+# stored summary is older than MW_SUMMARY_PERIOD seconds. MW_SUMMARY_REFRESH=1
+# forces a refresh; MW_SUMMARY_REQUIRE_SKILL=0 drops the skill gate.
 #
 # Invocation: receives the hook JSON on stdin (session_id, transcript_path).
 # Also accepts positional args ("$1" sid, "$2" transcript) for direct/testing.
@@ -31,6 +32,14 @@ if [ -z "$sid" ]; then
   tt="$(printf '%s' "$input" | jq -r '.transcript_path // ""' 2>/dev/null)"
 fi
 [ -z "$sid" ] && exit 0
+
+# Only summarize when this session actually loaded the multi-agent-watch skill
+# (ran a /mw-* command). Skips the `claude -p` cost for sessions that never
+# engaged the plugin. Set MW_SUMMARY_REQUIRE_SKILL=0 to summarize every session.
+if [ "$MW_SUMMARY_REQUIRE_SKILL" != "0" ] && ! mw_skill_engaged "$tt"; then
+  mw_log "summary skipped sid=$sid: skill not loaded"
+  exit 0
+fi
 
 mw_generate_summary "$sid" "$tt"
 exit 0

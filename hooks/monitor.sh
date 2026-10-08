@@ -106,7 +106,7 @@ fi
 ctx=""
 if [ -n "$msg_block" ]; then
   ctx="multi-agent-watch: $msg_count message(s) for you from sibling session(s):
-$msg_block"
+${msg_block}Reply: /mw-send <session-id-prefix> <message>"
 fi
 if [ -n "$delta_block" ]; then
   if [ -n "$ctx" ]; then ctx="${ctx}

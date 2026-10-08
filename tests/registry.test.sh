@@ -122,7 +122,28 @@ mw_generate_summary "sum-1" "$tt"
 ok "run-once: not called again" '[ "$(wc -l < "$calls" | tr -d " ")" = "1" ]'
 MW_SUMMARY_REFRESH=1 mw_generate_summary "sum-1" "$tt"
 ok "refresh mode re-calls"   '[ "$(wc -l < "$calls" | tr -d " ")" = "2" ]'
+
+echo "== summary: period expiry re-summarizes =="
+# Backdate summary_at beyond the period → next call must re-summarize.
+old_iso="$(date -u -r $(( $(date -u '+%s') - 9999 )) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+           || date -u -d '@'"$(( $(date -u '+%s') - 9999 ))" '+%Y-%m-%dT%H:%M:%SZ')"
+tmpf="$MW_SESSIONS_DIR/sum-1.json"
+jq --arg t "$old_iso" '.summary_at=$t' "$tmpf" > "$tmpf.tmp" && mv "$tmpf.tmp" "$tmpf"
+MW_SUMMARY_PERIOD=300 mw_generate_summary "sum-1" "$tt"
+ok "stale summary re-calls"  '[ "$(wc -l < "$calls" | tr -d " ")" = "3" ]'
+# Fresh again → within period → skip.
+MW_SUMMARY_PERIOD=300 mw_generate_summary "sum-1" "$tt"
+ok "fresh within period skips" '[ "$(wc -l < "$calls" | tr -d " ")" = "3" ]'
 unset MW_CLAUDE_BIN
+
+echo "== summary: skill-engaged gate =="
+ok "no /mw- in transcript ⇒ skill not engaged" '! mw_skill_engaged "$tt"'
+sk="$TMP/skill.jsonl"
+printf '%s\n' '{"type":"user","message":{"content":"/mw-status"}}' \
+  '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"multi-agent-watch:mw-status"}}]}}' \
+  > "$sk"
+ok "transcript with /mw- ⇒ engaged" 'mw_skill_engaged "$sk"'
+ok "empty transcript path ⇒ not engaged" '! mw_skill_engaged ""'
 
 echo "== subscriptions: watch / notify-on-summary-change / leave / auto-unsub =="
 rm -f "$MW_SESSIONS_DIR"/*.json

@@ -34,7 +34,6 @@ elif [ "$#" -eq 1 ]; then
 fi
 from_sid="${CLAUDE_CODE_SESSION_ID:-unknown}"
 from_cwd="$(pwd)"
-repo_key="$(mw_repo_key "$from_cwd")"
 
 list_recipients() {
   echo "active sessions you can message:" >&2
@@ -56,8 +55,10 @@ fi
 # Resolve recipients.
 targets=()
 if [ "$to_spec" = "all" ]; then
+  # `all` broadcasts to every active session (minus self), across all repos —
+  # the same set list_recipients shows. Empty repo filter = match all repos.
   while IFS= read -r line; do [ -n "$line" ] && targets+=("$line"); done \
-    < <(mw_resolve_sids all "$repo_key" "$from_sid")
+    < <(mw_resolve_sids all "" "$from_sid")
 else
   while IFS= read -r line; do [ -n "$line" ] && targets+=("$line"); done \
     < <(mw_resolve_sids "$to_spec" "" "$from_sid")
