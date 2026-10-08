@@ -5,13 +5,10 @@
 #   2. drains any messages addressed to us and injects them,
 #   3. compares the current set of OTHER sessions to the set we last reported
 #      and, when it changed, injects the delta plus each sibling's self-summary.
-# Summary GENERATION lives in the Stop hook (summarize.sh); this hook only reads
-# what siblings have published.
+# Summaries are GENERATED only when someone runs /mw-status (read-time, cached);
+# this hook just reads whatever siblings' entries currently hold.
 set -uo pipefail
 export MW_HOOK=monitor
-
-# Don't let the detached summarizer's own `claude` recurse into our hooks.
-[ -n "${MW_SUMMARY_CHILD:-}" ] && exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/registry.sh

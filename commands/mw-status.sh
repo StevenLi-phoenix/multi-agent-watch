@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Renders a human-readable summary of the session registry, grouped by repo,
-# flagging repos with more than one active session as COLLISION.
+# flagging repos with more than one active session as COLLISION. This read is
+# also the ONLY place self-summaries get generated: stale ones are refreshed
+# (in parallel, 15-minute cache) right before rendering.
 set -uo pipefail
+export MW_HOOK=mw-status
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/registry.sh
 source "$SCRIPT_DIR/../lib/registry.sh"
@@ -17,6 +20,8 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 0
 fi
 
+tally="$(mw_refresh_summaries)"
+
 jq -s '
   group_by(.repo_key)
   | map({
@@ -30,17 +35,22 @@ jq -s '
         started_at: .started_at,
         last_heartbeat: .last_heartbeat,
         summary: (.summary // ""),
+        summary_at: (.summary_at // ""),
         watchers: ((.watchers // []) | length)
       })
     })
   | sort_by(-.count)
 ' "${files[@]}" | jq -r '
+  def ago: if . == "" then "" else
+      (((now - (. | fromdateiso8601)) / 60) | floor) as $m
+      | if $m < 1 then "just now" elif $m < 60 then "\($m)m ago" else "\($m / 60 | floor)h ago" end
+    end;
   .[] |
   (if .count > 1 then "!! COLLISION" else "ok           " end) as $marker |
   "\($marker) [\(.count)] \(.repo)\n" +
   (.sessions | map("    - \(.session_id) host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
      + (if .watchers > 0 then " (watched by \(.watchers))" else "" end)
-     + (if .summary != "" then "\n        doing: \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
+     + (if .summary != "" then "\n        doing (\(.summary_at | ago)): \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
 '
 
 # Pending (undelivered) messages, grouped by recipient.
@@ -60,3 +70,12 @@ if [ ${#pending[@]} -gt 0 ]; then
     echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting"
   done
 fi
+
+echo
+echo "summaries: $MW_SUMMARY_MODEL · cache $((MW_SUMMARY_PERIOD / 60))m · ${tally:-nothing to do}"
+case "$tally" in
+  *no-key*) echo "    (OPENROUTER_API_KEY is not set in this shell — summaries can't be generated)" ;;
+esac
+case "$tally" in
+  *failed*) echo "    (some summary calls failed — see $MW_LOG)" ;;
+esac

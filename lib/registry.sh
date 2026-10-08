@@ -11,20 +11,20 @@ MW_STALE_SEC="${MW_STALE_SEC:-600}"
 MW_QUIET="${MW_QUIET:-0}"
 
 # Session self-summary (so sibling sessions learn what each other is doing).
-# Generated via `claude -p --model <model>`, refreshed every MW_SUMMARY_PERIOD
-# seconds so long-running sessions keep an up-to-date label (was run-once).
-MW_CLAUDE_BIN="${MW_CLAUDE_BIN:-claude}"
-MW_SUMMARY_MODEL="${MW_SUMMARY_MODEL:-haiku}"
-MW_SUMMARY_TIMEOUT="${MW_SUMMARY_TIMEOUT:-120}"
-# Re-summarize when the stored summary is older than this many seconds.
-# Set MW_SUMMARY_REFRESH=1 to force a refresh regardless of age.
-MW_SUMMARY_PERIOD="${MW_SUMMARY_PERIOD:-300}"
-# Only summarize sessions that actually engaged the multi-agent-watch skill
-# (ran a /mw-* command). Set to 0 to summarize every session unconditionally.
-MW_SUMMARY_REQUIRE_SKILL="${MW_SUMMARY_REQUIRE_SKILL:-1}"
+# Generated ON READ — only when /mw-status runs — via one OpenRouter call per
+# stale session (key: $OPENROUTER_API_KEY). Nothing runs on Stop or in the
+# background.
+MW_SUMMARY_MODEL="${MW_SUMMARY_MODEL:-deepseek/deepseek-v4.1-flash}"
+MW_SUMMARY_TIMEOUT="${MW_SUMMARY_TIMEOUT:-20}"
+# Cache: a summary younger than this many seconds (15 min) is reused as-is.
+# Past that it is regenerated only if the session's transcript changed since.
+# MW_SUMMARY_REFRESH=1 forces a regeneration regardless.
+MW_SUMMARY_PERIOD="${MW_SUMMARY_PERIOD:-900}"
+MW_OPENROUTER_URL="${MW_OPENROUTER_URL:-https://openrouter.ai/api/v1/chat/completions}"
+MW_SUMMARIES_DIR="$MW_STATE/summaries"   # raw API response per session
 
 mw_init() {
-  mkdir -p "$MW_SESSIONS_DIR" "$MW_MESSAGES_DIR" "$MW_LOCKS_DIR" 2>/dev/null || true
+  mkdir -p "$MW_SESSIONS_DIR" "$MW_MESSAGES_DIR" "$MW_LOCKS_DIR" "$MW_SUMMARIES_DIR" 2>/dev/null || true
   : >> "$MW_LOG" 2>/dev/null || true
 }
 
@@ -62,9 +62,13 @@ mw_repo_key() {
   fi
 }
 
-# File mtime as epoch seconds (macOS `stat -f`, GNU `stat -c`, else now).
+# File mtime as epoch seconds (GNU `stat -c`, macOS `stat -f`, else now).
+# GNU goes first: GNU `stat -f` is "filesystem status" and exits 0 with junk,
+# which broke arithmetic when coreutils' gnubin shadows /usr/bin/stat.
 mw_file_mtime() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || mw_now_epoch
+  local m
+  m="$(stat -c '%Y' "$1" 2>/dev/null)" || m="$(stat -f '%m' "$1" 2>/dev/null)" || m=""
+  case "$m" in ''|*[!0-9]*) mw_now_epoch ;; *) printf '%s' "$m" ;; esac
 }
 
 mw_purge_stale() {
@@ -180,7 +184,7 @@ mw_remove_session() {
   local sid="$1"
   mw_notify_watchers "$sid" "ended" "session closed — its files may be mid-change"
   mw_unwatch_all "$sid"   # this session is no longer watching anyone
-  rm -f "$MW_SESSIONS_DIR/$sid.json"
+  rm -f "$MW_SESSIONS_DIR/$sid.json" "$MW_SUMMARIES_DIR/$sid.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -269,9 +273,10 @@ mw_drain_inbox() {
 }
 
 # ---------------------------------------------------------------------------
-# Self-summary: a session describes (once) what it is working on, so sibling
-# sessions can read it and coordinate. Pull model — each session summarizes
-# itself once; observers read the stored field. N calls for N sessions.
+# Self-summary: a one-line "what this session is doing", generated ON READ.
+# /mw-status calls mw_refresh_summaries, which re-summarizes (in parallel) every
+# session whose cached summary is missing or stale. Observers elsewhere (banner,
+# monitor) just read the stored field.
 # ---------------------------------------------------------------------------
 
 mw_summary_value() {
@@ -288,15 +293,6 @@ mw_summary_at_epoch() {
     || date -u -d "$iso" '+%s' 2>/dev/null || printf ''
 }
 
-# True (rc 0) if the transcript shows this session engaged the plugin — i.e.
-# ran a /mw-* command, so its slash-command skill was loaded. Empty transcript
-# or no match ⇒ rc 1 (skill never loaded).
-mw_skill_engaged() {
-  local tt="$1"
-  [ -n "$tt" ] && [ -f "$tt" ] || return 1
-  grep -q 'multi-agent-watch:mw-' "$tt" 2>/dev/null
-}
-
 mw_set_summary() {
   local sid="$1" text="$2" file="$MW_SESSIONS_DIR/$1.json"
   [ -f "$file" ] || return 0
@@ -306,8 +302,8 @@ mw_set_summary() {
 }
 
 # Once-only guard. mkdir is atomic across processes: the first caller wins
-# (rc 0), everyone else gets rc 1. Used so concurrent hook fires never launch
-# a second `claude -p`.
+# (rc 0), everyone else gets rc 1. Used so two concurrent /mw-status reads
+# never pay for the same session twice.
 mw_try_lock() {
   mkdir -p "$MW_LOCKS_DIR" 2>/dev/null || true
   mkdir "$MW_LOCKS_DIR/$1" 2>/dev/null
@@ -328,49 +324,102 @@ mw_transcript_digest() {
   ' 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 40
 }
 
-# The model call, isolated so tests can stub it via MW_CLAUDE_BIN.
-mw_run_claude() {
-  local prompt="$1"
-  command -v "$MW_CLAUDE_BIN" >/dev/null 2>&1 || return 1
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$MW_SUMMARY_TIMEOUT" "$MW_CLAUDE_BIN" -p --model "$MW_SUMMARY_MODEL" "$prompt" 2>/dev/null
-  else
-    "$MW_CLAUDE_BIN" -p --model "$MW_SUMMARY_MODEL" "$prompt" 2>/dev/null
-  fi
+# POST the JSON body on stdin to OpenRouter; raw response on stdout. The key
+# rides in a curl config on a pipe, so it never appears in `ps` argv. This is
+# the only function that touches the network — tests stub it, or point
+# MW_OPENROUTER_URL at a file:// fixture.
+mw_llm_post() {
+  curl -sS --max-time "$MW_SUMMARY_TIMEOUT" -X POST "$MW_OPENROUTER_URL" \
+    -K <(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY") \
+    -H 'Content-Type: application/json' \
+    -H 'X-Title: multi-agent-watch' \
+    --data-binary @- 2>/dev/null
 }
 
-# Generate + store the one-line summary for $sid. Idempotent and run-once:
-# returns early if a summary already exists or the lock is held. Intended to be
-# invoked detached (see mw_spawn_summary / hooks/summarize.sh).
+# One summary call for $sid. Saves the raw response to summaries/<sid>.json
+# BEFORE parsing (a parse failure never loses a paid call), then prints the
+# model's text. Reasoning is off and providers are sorted by latency: this is
+# a 25-word label, not a think-hard task.
+mw_summary_call() {
+  local sid="$1" prompt="$2" raw="$MW_SUMMARIES_DIR/$1.json"
+  jq -n --arg m "$MW_SUMMARY_MODEL" --arg p "$prompt" '{
+      model: $m,
+      max_tokens: 120,
+      temperature: 0.2,
+      reasoning: {effort: "none"},
+      provider: {sort: "latency"},
+      messages: [{role: "user", content: $p}]
+    }' | mw_llm_post | mw_atomic_write "$raw" || return 1
+  jq -r '.choices[0].message.content // empty' "$raw" 2>/dev/null
+}
+
+# Bring $sid's summary up to date and print one status word:
+#   cached        summary younger than MW_SUMMARY_PERIOD — reused, no call
+#   unchanged     cache expired but the transcript hasn't changed since — no call
+#   regenerated   called the model and stored a new summary
+#   failed        the call errored or returned nothing (reason in the log)
+#   no-key / no-transcript / in-flight   skipped without a call
 mw_generate_summary() {
-  local sid="$1" tt="$2" digest prompt out stored prev
+  local sid="$1" tt="$2" prev at now digest prompt out stored t0 cost err
   prev="$(mw_summary_value "$sid")"
-  # Period-based refresh: skip only if a summary exists AND is younger than
-  # MW_SUMMARY_PERIOD seconds. MW_SUMMARY_REFRESH=1 forces a refresh; a period
-  # of 0 also always refreshes.
-  if [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$prev" ] && [ "$MW_SUMMARY_PERIOD" -gt 0 ] 2>/dev/null; then
-    local at now
+  if [ -z "${MW_SUMMARY_REFRESH:-}" ] && [ -n "$prev" ]; then
     at="$(mw_summary_at_epoch "$sid")"
     now="$(mw_now_epoch)"
-    if [ -n "$at" ] && [ $((now - at)) -lt "$MW_SUMMARY_PERIOD" ]; then
-      return 0
+    if [ -n "$at" ]; then
+      if [ $((now - at)) -lt "$MW_SUMMARY_PERIOD" ]; then echo cached; return 0; fi
+      # Expired, but an idle session's label can't have changed — don't pay
+      # to regenerate it until its transcript moves again.
+      if [ -f "$tt" ] && [ "$(mw_file_mtime "$tt")" -le "$at" ]; then
+        echo unchanged; return 0
+      fi
     fi
   fi
-  mw_try_lock "summary-$sid" || return 0             # another run in flight
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    mw_log "summary skipped sid=$sid: OPENROUTER_API_KEY not set"
+    echo no-key; return 0
+  fi
   digest="$(mw_transcript_digest "$tt" 2>/dev/null || printf '')"
-  if [ -z "$digest" ]; then mw_unlock "summary-$sid"; return 0; fi
+  [ -z "$digest" ] && { echo no-transcript; return 0; }
+  mw_try_lock "summary-$sid" || { echo in-flight; return 0; }
   prompt="You are labeling a Claude Code coding session so sibling sessions in the same repo can avoid conflicts. In ONE sentence (max 25 words, no preamble, no quotes), state concretely what this session is doing: the files, feature, or task. Transcript digest (oldest to newest):
 $digest"
-  out="$( export MW_SUMMARY_CHILD=1 MW_QUIET=1; mw_run_claude "$prompt" )"
+  t0="$(mw_now_epoch)"
+  out="$(mw_summary_call "$sid" "$prompt")"
   out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g; s/^ *//; s/ *$//')"
   if [ -n "$out" ]; then
     stored="${out:0:280}"
     mw_set_summary "$sid" "$stored"
-    mw_log "summary set sid=$sid: ${stored:0:80}"
+    cost="$(jq -r '.usage.cost // "?"' "$MW_SUMMARIES_DIR/$sid.json" 2>/dev/null)"
+    mw_log "summary set sid=$sid model=$MW_SUMMARY_MODEL $(( $(mw_now_epoch) - t0 ))s cost=\$${cost}: ${stored:0:80}"
     # Notify subscribers only when the summary actually changed.
     [ "$stored" != "$prev" ] && mw_notify_watchers "$sid" "updated" "${stored:0:200}"
+    echo regenerated
+  else
+    err="$(jq -r '.error.message // empty' "$MW_SUMMARIES_DIR/$sid.json" 2>/dev/null)"
+    mw_log "summary FAILED sid=$sid model=$MW_SUMMARY_MODEL: ${err:-empty/unparseable response}"
+    echo failed
   fi
   mw_unlock "summary-$sid"
+}
+
+# Read-time refresh: bring every registered session's summary up to date in
+# parallel (each call capped by MW_SUMMARY_TIMEOUT), then print a tally such
+# as "2 cached, 1 regenerated".
+mw_refresh_summaries() {
+  local f sid tt dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/mw-sum.XXXXXX")" || return 0
+  shopt -s nullglob
+  for f in "$MW_SESSIONS_DIR"/*.json; do
+    sid="$(basename "$f" .json)"
+    tt="$(jq -r '.transcript_path // ""' "$f" 2>/dev/null)"
+    mw_generate_summary "$sid" "$tt" > "$dir/$sid" 2>/dev/null &
+  done
+  shopt -u nullglob
+  wait
+  cat "$dir"/* 2>/dev/null | sort | uniq -c \
+    | awk '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $1, $2 } END { if (NR) print "" }'
+  rm -rf "$dir"
+  return 0
 }
 
 # ---------------------------------------------------------------------------

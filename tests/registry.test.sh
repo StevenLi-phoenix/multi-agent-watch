@@ -98,52 +98,98 @@ ok "second lock refused"  '! mw_try_lock lk-1'
 mw_unlock lk-1
 ok "lock reusable after unlock" 'mw_try_lock lk-1'; mw_unlock lk-1
 
-echo "== summary: generate via stubbed claude, exactly once =="
-calls="$TMP/claude.calls"
+# Stub the network: mw_llm_post is the only function that talks to OpenRouter.
+# It records each call + the request body and replies with a canned response.
+export OPENROUTER_API_KEY="sk-test-not-a-real-key"
+calls="$TMP/llm.calls"; body="$TMP/llm.body.json"; resp="$TMP/llm.resp.json"
 : > "$calls"
-cat > "$TMP/fake-claude" <<EOF
-#!/usr/bin/env bash
-echo call >> "$calls"
-echo "editing lib/registry.sh: adding messaging + summary"
-EOF
-chmod +x "$TMP/fake-claude"
-export MW_CLAUDE_BIN="$TMP/fake-claude"
+jq -n '{choices:[{message:{content:"editing lib/registry.sh:\n adding  messaging"}}],usage:{cost:0.00002}}' > "$resp"
+mw_llm_post() { cat > "$body"; echo call >> "$calls"; cat "$resp"; }
+ncalls() { wc -l < "$calls" | tr -d " "; }
+# Push a session's summary_at back by $2 seconds (simulate the cache aging).
+age_summary() {
+  local f="$MW_SESSIONS_DIR/$1.json" iso
+  iso="$(date -u -r $(( $(date -u '+%s') - $2 )) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+         || date -u -d '@'"$(( $(date -u '+%s') - $2 ))" '+%Y-%m-%dT%H:%M:%SZ')"
+  jq --arg t "$iso" '.summary_at=$t' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+echo "== summary: generated via OpenRouter (stubbed) =="
 tt="$TMP/t.jsonl"
 printf '%s\n' \
   '{"type":"user","message":{"content":"fix the registry concurrency bug"}}' \
   '{"type":"assistant","message":{"content":[{"type":"text","text":"editing registry.sh now"}]}}' \
   > "$tt"
 mw_write_session "sum-1" "/repo/z" "$tt" startup
-ok "digest non-empty"        '[ -n "$(mw_transcript_digest "$tt")" ]'
-mw_generate_summary "sum-1" "$tt"
-ok "summary stored"          '[ -n "$(mw_summary_value sum-1)" ]'
-ok "claude called once"      '[ "$(wc -l < "$calls" | tr -d " ")" = "1" ]'
-mw_generate_summary "sum-1" "$tt"
-ok "run-once: not called again" '[ "$(wc -l < "$calls" | tr -d " ")" = "1" ]'
-MW_SUMMARY_REFRESH=1 mw_generate_summary "sum-1" "$tt"
-ok "refresh mode re-calls"   '[ "$(wc -l < "$calls" | tr -d " ")" = "2" ]'
+ok "digest non-empty"         '[ -n "$(mw_transcript_digest "$tt")" ]'
+st="$(mw_generate_summary "sum-1" "$tt")"
+ok "status = regenerated"     '[ "$st" = "regenerated" ]'
+ok "summary stored, one line" '[ "$(mw_summary_value sum-1)" = "editing lib/registry.sh: adding messaging" ]'
+ok "called once"              '[ "$(ncalls)" = "1" ]'
+ok "raw response saved"       'jq -e ".usage.cost" "$MW_SUMMARIES_DIR/sum-1.json" >/dev/null'
+ok "model = deepseek v4.1 flash" '[ "$(jq -r .model "$body")" = "deepseek/deepseek-v4.1-flash" ]'
+ok "reasoning disabled"       '[ "$(jq -r .reasoning.effort "$body")" = "none" ]'
+ok "prompt carries digest"    'jq -r ".messages[0].content" "$body" | grep -q "registry concurrency bug"'
 
-echo "== summary: period expiry re-summarizes =="
-# Backdate summary_at beyond the period → next call must re-summarize.
-old_iso="$(date -u -r $(( $(date -u '+%s') - 9999 )) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-           || date -u -d '@'"$(( $(date -u '+%s') - 9999 ))" '+%Y-%m-%dT%H:%M:%SZ')"
-tmpf="$MW_SESSIONS_DIR/sum-1.json"
-jq --arg t "$old_iso" '.summary_at=$t' "$tmpf" > "$tmpf.tmp" && mv "$tmpf.tmp" "$tmpf"
-MW_SUMMARY_PERIOD=300 mw_generate_summary "sum-1" "$tt"
-ok "stale summary re-calls"  '[ "$(wc -l < "$calls" | tr -d " ")" = "3" ]'
-# Fresh again → within period → skip.
-MW_SUMMARY_PERIOD=300 mw_generate_summary "sum-1" "$tt"
-ok "fresh within period skips" '[ "$(wc -l < "$calls" | tr -d " ")" = "3" ]'
-unset MW_CLAUDE_BIN
+echo "== summary: 15-minute cache =="
+ok "default period is 900s"   '[ "$MW_SUMMARY_PERIOD" = "900" ]'
+st="$(mw_generate_summary "sum-1" "$tt")"
+ok "fresh summary ⇒ cached"   '[ "$st" = "cached" ] && [ "$(ncalls)" = "1" ]'
+age_summary sum-1 600
+st="$(mw_generate_summary "sum-1" "$tt")"
+ok "10 min old ⇒ still cached" '[ "$st" = "cached" ] && [ "$(ncalls)" = "1" ]'
+st="$(MW_SUMMARY_REFRESH=1 mw_generate_summary "sum-1" "$tt")"
+ok "MW_SUMMARY_REFRESH=1 forces" '[ "$st" = "regenerated" ] && [ "$(ncalls)" = "2" ]'
 
-echo "== summary: skill-engaged gate =="
-ok "no /mw- in transcript ⇒ skill not engaged" '! mw_skill_engaged "$tt"'
-sk="$TMP/skill.jsonl"
-printf '%s\n' '{"type":"user","message":{"content":"/mw-status"}}' \
-  '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"multi-agent-watch:mw-status"}}]}}' \
-  > "$sk"
-ok "transcript with /mw- ⇒ engaged" 'mw_skill_engaged "$sk"'
-ok "empty transcript path ⇒ not engaged" '! mw_skill_engaged ""'
+echo "== summary: expired cache re-generates only if the session moved on =="
+age_summary sum-1 1000
+touch -t 200001010000 "$tt"                  # transcript untouched since summary
+st="$(mw_generate_summary "sum-1" "$tt")"
+ok "expired + idle transcript ⇒ unchanged, no call" '[ "$st" = "unchanged" ] && [ "$(ncalls)" = "2" ]'
+touch "$tt"                                  # session wrote more since
+st="$(mw_generate_summary "sum-1" "$tt")"
+ok "expired + new activity ⇒ regenerated" '[ "$st" = "regenerated" ] && [ "$(ncalls)" = "3" ]'
+
+echo "== summary: no key / API error / no transcript =="
+mw_write_session "sum-2" "/repo/z" "$tt" startup
+st="$(OPENROUTER_API_KEY= mw_generate_summary "sum-2" "$tt")"
+ok "no key ⇒ no-key, no call" '[ "$st" = "no-key" ] && [ "$(ncalls)" = "3" ]'
+jq -n '{error:{code:402,message:"Insufficient credits"}}' > "$resp"
+st="$(mw_generate_summary "sum-2" "$tt")"
+ok "API error ⇒ failed"       '[ "$st" = "failed" ] && [ -z "$(mw_summary_value sum-2)" ]'
+ok "error raw kept on disk"   'jq -e ".error.code == 402" "$MW_SUMMARIES_DIR/sum-2.json" >/dev/null'
+ok "failure logged"           'grep -q "Insufficient credits" "$MW_LOG"'
+ok "lock released after failure" 'mw_try_lock summary-sum-2'; mw_unlock summary-sum-2
+mw_write_session "sum-3" "/repo/z" "/nope/missing.jsonl" startup
+st="$(mw_generate_summary "sum-3" "/nope/missing.jsonl")"
+ok "missing transcript ⇒ no-transcript" '[ "$st" = "no-transcript" ]'
+jq -n '{choices:[{message:{content:"editing lib/registry.sh"}}],usage:{cost:0.00002}}' > "$resp"
+
+echo "== summary: refresh-on-read covers every session, in parallel =="
+rm -f "$MW_SESSIONS_DIR"/*.json; : > "$calls"
+for n in 1 2 3; do mw_write_session "par-$n" "/repo/p" "$tt" startup; done
+tally="$(mw_refresh_summaries)"
+ok "each session called once" '[ "$(ncalls)" = "3" ]'
+ok "all three summarized"     '[ -n "$(mw_summary_value par-1)" ] && [ -n "$(mw_summary_value par-3)" ]'
+ok "tally reports regenerated" 'printf "%s" "$tally" | grep -q "3 regenerated"'
+tally="$(mw_refresh_summaries)"
+ok "second read is all cache" '[ "$(ncalls)" = "3" ] && printf "%s" "$tally" | grep -q "3 cached"'
+mw_remove_session "par-3"
+ok "raw response removed with its session" '[ ! -f "$MW_SUMMARIES_DIR/par-3.json" ]'
+
+echo "== /mw-status end-to-end (file:// fixture stands in for OpenRouter) =="
+fixture="$TMP/fixture.json"
+jq -n '{choices:[{message:{content:"wiring the e2e fixture"}}],usage:{cost:0}}' > "$fixture"
+rm -f "$MW_SESSIONS_DIR"/*.json
+mw_write_session "e2e-1" "/repo/e" "$tt" startup
+mw_write_session "e2e-2" "/repo/e" "$tt" startup
+out="$(MW_OPENROUTER_URL="file://$fixture" bash "$HERE/../commands/mw-status.sh")"
+ok "status shows collision"   'printf "%s" "$out" | grep -q "COLLISION"'
+ok "status shows new summary" 'printf "%s" "$out" | grep -q "wiring the e2e fixture"'
+ok "status shows summary age" 'printf "%s" "$out" | grep -q "just now"'
+ok "status footer: model + cache" 'printf "%s" "$out" | grep -q "deepseek/deepseek-v4.1-flash · cache 15m · 2 regenerated"'
+out="$(OPENROUTER_API_KEY= MW_OPENROUTER_URL="file://$fixture" bash "$HERE/../commands/mw-status.sh")"
+ok "second read served from cache" 'printf "%s" "$out" | grep -q "2 cached"'
 
 echo "== subscriptions: watch / notify-on-summary-change / leave / auto-unsub =="
 rm -f "$MW_SESSIONS_DIR"/*.json
@@ -156,12 +202,10 @@ mw_add_watch "watcher-1" "target-1"
 ok "watcher recorded"        '[ "$(mw_watchers target-1)" = "watcher-1" ]'
 ok "watch is idempotent"     'mw_add_watch watcher-1 target-1; [ "$(mw_watchers target-1 | wc -l | tr -d " ")" = "1" ]'
 
-# summary change notifies the watcher
-export MW_CLAUDE_BIN="$TMP/fake-claude"   # reuse stub from earlier
-mw_generate_summary "target-1" "$tt"
+# summary change notifies the watcher (network still stubbed via mw_llm_post)
+mw_generate_summary "target-1" "$tt" >/dev/null
 ok "summary-change pinged watcher" '[ "$(mw_inbox_count watcher-1)" -ge 1 ]'
 ok "ping mentions target"          'mw_drain_inbox watcher-1 | grep -q "target-1"'
-unset MW_CLAUDE_BIN
 
 # unsubscribe
 mw_remove_watch "watcher-1" "target-1"

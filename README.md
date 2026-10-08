@@ -19,10 +19,11 @@ messages for another running session.
 - `Stop` refreshes the heartbeat. Stale entries (>10 min since last heartbeat) are auto-purged on every hook fire. `SessionEnd` removes the entry immediately.
 
 ### Self-summary (what each session is doing)
-- On `Stop`, an **async** hook (`summarize.sh`) runs `claude -p --model haiku` over a digest of the session's transcript and stores a one-sentence summary in the session's registry entry.
-- It is **run-once by default**: the model call fires a single time per session (guarded by an atomic lock + a cached `summary` field). Set `MW_SUMMARY_REFRESH=1` to instead refresh the summary on every `Stop` as the work evolves.
-- The call is async, so it never blocks your turn, and it's detached from your context — the spawned `claude` is marked (`MW_SUMMARY_CHILD`) so it doesn't recurse into these hooks.
-- Other sessions **read** that summary: collision banners and `monitor` deltas show each sibling's `doing: …` line. N sessions ⇒ N summary calls total (each summarizes itself), not N².
+- Generated **on read only**: running `/mw-status` refreshes every session's one-sentence summary right before rendering it. Nothing runs on `Stop` or in the background, so sessions that never look at the roster cost nothing.
+- Each stale session gets one call to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, reasoning off, providers sorted by latency) over a digest of its transcript. Calls run in parallel and are capped at `MW_SUMMARY_TIMEOUT` seconds, so a read takes about one round-trip (~1–2 s). A call costs about $0.00002.
+- **15-minute cache**: a summary younger than `MW_SUMMARY_PERIOD` (900 s) is reused as-is. After that it is regenerated only if the session's transcript changed since, so an idle session never pays again. `MW_SUMMARY_REFRESH=1` forces a regeneration. An atomic lock stops two concurrent reads from paying for the same session.
+- The raw API response is saved to `summaries/<session-id>.json` before parsing; cost, latency and failures go to the log. The `/mw-status` footer shows the model, the cache window and a tally (`2 cached, 1 regenerated`).
+- Collision banners and `monitor` deltas show the last stored `doing: …` line for each sibling.
 
 ### Direct messages (留言)
 - `/mw-send <session-id-prefix | all> <message>` leaves a note for another active session on the same repo.
@@ -57,16 +58,19 @@ auto-registered from `hooks/hooks.json`.
 | `MW_STATE`           | `~/.claude/state/multi-agent-watch` | state directory                                                    |
 | `MW_STALE_SEC`       | `600`                               | heartbeat staleness threshold (seconds)                            |
 | `MW_QUIET`           | `0`                                 | `1` suppresses desktop notification                                |
-| `MW_CLAUDE_BIN`      | `claude`                            | binary used to generate the self-summary                           |
-| `MW_SUMMARY_MODEL`   | `haiku`                             | model passed to `claude -p --model`                                |
-| `MW_SUMMARY_TIMEOUT` | `120`                               | seconds before the summary call is killed (`timeout`, if present)  |
-| `MW_SUMMARY_REFRESH` | unset                               | `1` regenerates the summary on every `Stop` instead of run-once    |
+| `OPENROUTER_API_KEY` | —                                   | key for the summary call; unset ⇒ summaries skipped (footer says so) |
+| `MW_SUMMARY_MODEL`   | `deepseek/deepseek-v4.1-flash`      | OpenRouter model slug used for self-summaries                      |
+| `MW_SUMMARY_PERIOD`  | `900`                               | summary cache lifetime in seconds (15 min)                         |
+| `MW_SUMMARY_TIMEOUT` | `20`                                | per-call `curl --max-time` (seconds)                               |
+| `MW_SUMMARY_REFRESH` | unset                               | `1` ignores the cache and regenerates on this read                 |
+| `MW_OPENROUTER_URL`  | OpenRouter chat-completions URL     | endpoint override (tests point it at a `file://` fixture)          |
 
 ## Files
 
 - `~/.claude/state/multi-agent-watch/sessions/<session-id>.json` — one per active session (includes `summary`)
 - `~/.claude/state/multi-agent-watch/messages/<recipient-sid>/*.json` — queued, undelivered messages
-- `~/.claude/state/multi-agent-watch/locks/` — once-only summary locks
+- `~/.claude/state/multi-agent-watch/summaries/<session-id>.json` — raw OpenRouter response of the last summary call
+- `~/.claude/state/multi-agent-watch/locks/` — per-session summary locks
 - `~/.claude/state/multi-agent-watch/multi-agent-watch.log` — diagnostic log
 
 ## Tests
@@ -76,18 +80,22 @@ bash tests/registry.test.sh   # exit 0 = all green
 ```
 
 Covers atomic writes under concurrency, purge safety (never deletes a fresh
-mid-write file), message send/drain, recipient resolution, and run-once summary
-generation against a stubbed `claude`.
+mid-write file), message send/drain, recipient resolution, and summary
+generation: the 15-minute cache, idle-skip, failure paths, the parallel
+refresh, and an end-to-end `/mw-status` run against a `file://` fixture. No
+network calls.
 
 ## Limitations
 
 - Single machine — sessions on other hosts won't be visible unless `MW_STATE` points at a shared volume (Tailscale fileshare, Dropbox, NFS, etc.).
 - Repo identity is `git rev-parse --show-toplevel` or absolute cwd. Sibling subdirs of one repo are treated as the same repo.
 - Subagents launched via the `Task` tool share the parent's `session_id` and don't show up as separate sessions (intentional — they aren't independent).
-- The self-summary requires the `claude` CLI on `PATH`; if it's missing the summary is simply skipped (collision detection still works).
+- Self-summaries need `OPENROUTER_API_KEY` in the environment Claude Code was launched from. Without it they are skipped and collision detection still works.
+- Summaries are only as fresh as the last `/mw-status`. Banners and monitor deltas show whatever was stored by that read.
 
 ## Changelog
 
+- **0.3.0** — self-summaries move from a `claude -p` Stop hook to read-time generation in `/mw-status`: DeepSeek V4.1 Flash via OpenRouter, parallel, 15-minute cache plus idle-skip. Also fixes `mw_file_mtime` when GNU coreutils shadows `stat`. See CHANGELOG.md.
 - **0.2.1** — fix `/mw-send` slash quoting so non-ASCII / glob-char messages no longer trip zsh `no matches found` (message passed as one quoted blob, recipient split in-script); `mw_write_session` now merges onto the existing entry so `summary` / `watchers` / `known_others` survive heartbeat rewrites. Adds subscriptions (`/mw-watch`): get pinged when a watched session changes its summary or ends, auto-unsubscribe on SessionEnd; `/mw-status` shows watcher counts.
 - **0.2.0** — atomic registry writes + safer stale-purge (never deletes a file caught mid-write); per-session `claude -p` self-summaries surfaced to siblings; direct inter-session messaging (`/mw-send`); `/mw-status` shows summaries and pending messages; unit + integration tests.
 - **0.1.0** — collision detection, monitor deltas, desktop notifications, `/mw-status`.

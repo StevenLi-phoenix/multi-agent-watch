@@ -5,8 +5,9 @@ Dev notes for working on this Claude Code plugin. Read this before editing.
 ## What it is
 
 A Claude Code plugin that detects concurrent sessions on the same repo and lets
-them coordinate: collision banners, per-session `claude -p` self-summaries, direct
-messages (`/mw-send`), and subscriptions (`/mw-watch`). Pure bash + `jq`, no build.
+them coordinate: collision banners, per-session self-summaries (generated at read
+time by `/mw-status` via OpenRouter), direct messages (`/mw-send`), and
+subscriptions (`/mw-watch`). Pure bash + `jq` + `curl`, no build.
 
 ## ⚠️ Three copies — edit the right ones
 
@@ -31,14 +32,16 @@ and commit. Confirm LIVE is what's running via a registry entry's `source` field
 
 - `lib/registry.sh` — all state helpers, sourced by every hook. State lives under
   `$MW_STATE` (default `~/.claude/state/multi-agent-watch/`): `sessions/<sid>.json`
-  (one per session), `messages/<sid>/*.json` (inboxes), `locks/` (once-only locks),
-  `multi-agent-watch.log`.
+  (one per session), `messages/<sid>/*.json` (inboxes), `summaries/<sid>.json`
+  (raw OpenRouter response of the last summary call), `locks/` (per-session
+  summary locks), `multi-agent-watch.log`.
 - Hooks (`hooks/hooks.json` wires them):
   - `SessionStart` → `session-start.sh`: register + collision banner/notify/context
     + set known-others baseline.
   - `UserPromptSubmit` + `PostToolUse` → `monitor.sh`: heartbeat, purge, **drain
     inbox** (messages + watch pings), inject roster delta + siblings' summaries.
-  - `Stop` → `heartbeat.sh` (sync, refresh) **and** `summarize.sh` (`async: true`).
+  - `Stop` → `heartbeat.sh` (heartbeat refresh only). `summarize.sh` is a
+    deprecated no-op kept for sessions started under the ≤0.2.2 hooks.json.
   - `SessionEnd` → `session-end.sh` → `mw_remove_session`.
 - `commands/` — `/mw-status`, `/mw-send`, `/mw-watch` (`.md` = slash command,
   `.sh` = implementation).
@@ -62,13 +65,20 @@ known_others_at, summary, summary_at, watchers[]`.
   this was the v0.2.1 bug.
 - **Purge is conservative.** `mw_purge_stale` deletes an unparseable file only if
   it's also OLD on disk (mtime), never a fresh mid-write one.
-- **Summary runs once.** `summarize.sh` fires on every Stop (async), but
-  `mw_generate_summary` is run-once: skips if a summary exists, guarded by an
-  atomic `mkdir` lock. `MW_SUMMARY_REFRESH=1` opts into per-Stop refresh. N
-  sessions ⇒ N summary calls, not N². The model call is async so it never blocks
-  the turn.
-- **No hook recursion.** The summarizer exports `MW_SUMMARY_CHILD=1`; every hook
-  early-exits when it's set, so the spawned `claude -p` doesn't re-enter the hooks.
+- **Summaries are generated on read only.** The only caller is `/mw-status` →
+  `mw_refresh_summaries` (parallel, one `mw_generate_summary` per session). Do not
+  add a Stop/monitor trigger. The per-Stop `claude -p` burned tokens on every
+  session and was removed in 0.3.0.
+- **Cache before cost.** `mw_generate_summary` returns `cached` when the summary
+  is younger than `MW_SUMMARY_PERIOD` (900 s). Once expired it returns
+  `unchanged` if the transcript mtime is ≤ `summary_at`, i.e. the session is idle.
+  It only calls the model past both checks, under an atomic `mkdir` lock.
+- **Network is one function.** `mw_llm_post` is the only code that hits
+  OpenRouter. Tests override it, or set `MW_OPENROUTER_URL=file://…`, and set a
+  fake `OPENROUTER_API_KEY`. The suite must never make a real call.
+- **Raw before parse.** `mw_summary_call` writes the raw response to
+  `summaries/<sid>.json` before extracting content. The key goes through
+  `curl -K <(…)` so it stays out of `ps` argv.
 - **Inbox drain before early-exit.** `monitor.sh` drains messages/watch-pings
   *before* the roster-unchanged early return, or messages would only arrive when
   the roster changes.
@@ -87,8 +97,12 @@ known_others_at, summary, summary_at, watchers[]`.
   shell line. Wrap it as `"$ARGUMENTS"` (one blob) and split inside the script, or
   zsh globs the message (`no matches found` on `* ? [`, non-ASCII). Messages with
   `"` / `$(` / backticks still need the Bash-tool path with manual quoting.
-- **macOS bash is 3.2** — no `mapfile`; use `while read` loops. `stat -f %m` (macOS)
-  vs `stat -c %Y` (GNU) — `mw_file_mtime` handles both.
+- **macOS bash is 3.2** — no `mapfile`; use `while read` loops.
+- **GNU coreutils shadows `stat` on this machine** (gnubin is on PATH). GNU
+  `stat -f` means "filesystem status" and exits 0 with junk. `mw_file_mtime`
+  therefore tries `stat -c %Y` first and validates that the result is numeric.
+  Run the tests under both PATHs:
+  `PATH=/usr/bin:/bin:/opt/homebrew/bin bash tests/registry.test.sh`.
 
 ## Release
 
