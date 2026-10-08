@@ -67,7 +67,11 @@ if [ ${#pending[@]} -gt 0 ]; then
     shopt -u nullglob
     [ ${#m[@]} -eq 0 ] && continue
     rid="$(basename "$d")"
-    echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting"
+    if [ -f "$MW_SESSIONS_DIR/$rid.json" ]; then
+      echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting"
+    else
+      echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting — recipient not registered (dropped $((MW_INBOX_TTL / 3600))h after the last message unless it comes back)"
+    fi
   done
 fi
 

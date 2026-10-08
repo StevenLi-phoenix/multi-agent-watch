@@ -82,6 +82,11 @@ known_others_at, summary, summary_at, watchers[]`.
 - **Inbox drain before early-exit.** `monitor.sh` drains messages/watch-pings
   *before* the roster-unchanged early return, or messages would only arrive when
   the roster changes.
+- **Orphan inboxes have a grace period.** Never delete a recipient's inbox in
+  `mw_remove_session`. A stale-purged-while-idle or resumed session re-registers
+  under the same id and should still get its mail. `mw_purge_orphan_inboxes`
+  (called from `mw_purge_stale`) drops an inbox only when the recipient is
+  unregistered **and** its newest message is older than `MW_INBOX_TTL`.
 - **Subscriptions:** watchers are stored on the WATCHED entry (`.watchers[]`);
   `mw_set_summary`-change and `mw_remove_session` fan out via `mw_send_message` to
   watcher inboxes. SessionEnd auto-unsubscribes (`mw_unwatch_all`); dead watchers

@@ -28,6 +28,7 @@ messages for another running session.
 ### Direct messages (留言)
 - `/mw-send <session-id-prefix | all> <message>` leaves a note for another active session on the same repo.
 - The recipient's `monitor` hook delivers the message (and deletes it) into its context on its next prompt or tool use.
+- Mail for a session that has left is kept for `MW_INBOX_TTL` (24h) after its last message, in case the session comes back under the same id. After that it is purged and the purge is logged.
 - `all` broadcasts to every other session on your repo (you are excluded). A prefix targets specific session(s).
 - Sender identity comes from `$CLAUDE_CODE_SESSION_ID`.
 
@@ -58,6 +59,7 @@ auto-registered from `hooks/hooks.json`.
 | `MW_STATE`           | `~/.claude/state/multi-agent-watch` | state directory                                                    |
 | `MW_STALE_SEC`       | `600`                               | heartbeat staleness threshold (seconds)                            |
 | `MW_QUIET`           | `0`                                 | `1` suppresses desktop notification                                |
+| `MW_INBOX_TTL`       | `86400`                             | drop an unregistered recipient's inbox this long after its last message |
 | `OPENROUTER_API_KEY` | —                                   | key for the summary call; unset ⇒ summaries skipped (footer says so) |
 | `MW_SUMMARY_MODEL`   | `deepseek/deepseek-v4.1-flash`      | OpenRouter model slug used for self-summaries                      |
 | `MW_SUMMARY_PERIOD`  | `900`                               | summary cache lifetime in seconds (15 min)                         |
@@ -95,6 +97,7 @@ network calls.
 
 ## Changelog
 
+- **0.3.1** — purge inboxes of recipients that are gone (24h grace, `MW_INBOX_TTL`); `/mw-status` flags them.
 - **0.3.0** — self-summaries move from a `claude -p` Stop hook to read-time generation in `/mw-status`: DeepSeek V4.1 Flash via OpenRouter, parallel, 15-minute cache plus idle-skip. Also fixes `mw_file_mtime` when GNU coreutils shadows `stat`. See CHANGELOG.md.
 - **0.2.1** — fix `/mw-send` slash quoting so non-ASCII / glob-char messages no longer trip zsh `no matches found` (message passed as one quoted blob, recipient split in-script); `mw_write_session` now merges onto the existing entry so `summary` / `watchers` / `known_others` survive heartbeat rewrites. Adds subscriptions (`/mw-watch`): get pinged when a watched session changes its summary or ends, auto-unsubscribe on SessionEnd; `/mw-status` shows watcher counts.
 - **0.2.0** — atomic registry writes + safer stale-purge (never deletes a file caught mid-write); per-session `claude -p` self-summaries surfaced to siblings; direct inter-session messaging (`/mw-send`); `/mw-status` shows summaries and pending messages; unit + integration tests.

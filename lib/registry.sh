@@ -8,6 +8,10 @@ MW_MESSAGES_DIR="$MW_STATE/messages"
 MW_LOCKS_DIR="$MW_STATE/locks"
 MW_LOG="$MW_STATE/multi-agent-watch.log"
 MW_STALE_SEC="${MW_STALE_SEC:-600}"
+# An inbox whose recipient is no longer registered is dropped once its newest
+# message is older than this (24h). The grace period keeps mail for a session
+# that was stale-purged while idle (or resumed) and re-registers under its id.
+MW_INBOX_TTL="${MW_INBOX_TTL:-86400}"
 MW_QUIET="${MW_QUIET:-0}"
 
 # Session self-summary (so sibling sessions learn what each other is doing).
@@ -100,6 +104,30 @@ mw_purge_stale() {
         fi
         ;;
     esac
+  done
+  shopt -u nullglob
+  mw_purge_orphan_inboxes
+}
+
+# Drop inboxes of recipients that are no longer registered once their newest
+# message is older than MW_INBOX_TTL (empty leftover dirs go immediately).
+mw_purge_orphan_inboxes() {
+  local now d sid f m newest cnt
+  now="$(mw_now_epoch)"
+  shopt -s nullglob
+  for d in "$MW_MESSAGES_DIR"/*/; do
+    sid="$(basename "$d")"
+    [ -f "$MW_SESSIONS_DIR/$sid.json" ] && continue
+    newest=0; cnt=0
+    for f in "$d"*.json; do
+      m="$(mw_file_mtime "$f")"
+      [ "$m" -gt "$newest" ] && newest="$m"
+      cnt=$((cnt+1))
+    done
+    if [ $((now - newest)) -gt "$MW_INBOX_TTL" ]; then
+      rm -rf "$d"
+      mw_log "purge orphan inbox: $sid ($cnt undelivered message(s), recipient gone)"
+    fi
   done
   shopt -u nullglob
 }

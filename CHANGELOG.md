@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-07 — Orphan inbox cleanup
+
+### Fixed
+- Messages addressed to a session that ended before draining them stayed in `messages/<sid>/` forever, and `/mw-status` kept listing them as "waiting". `mw_purge_stale` now drops an inbox when its recipient is no longer registered and its newest message is older than `MW_INBOX_TTL` (default 24h). Empty leftover dirs are dropped right away. The grace period keeps mail for a session that was stale-purged while idle, or resumed, and comes back under the same id. Each drop is logged.
+  Files: lib/registry.sh (new `mw_purge_orphan_inboxes`)
+- `/mw-status` now marks the pending inboxes whose recipient isn't registered, and says when they will be dropped.
+  Files: commands/mw-status.sh
+
+### Tests
+- Orphan purge: an old orphan is dropped and logged, an empty dir is dropped, a fresh orphan is kept during the grace period, a live recipient's old mail is kept, and `/mw-status` flags orphans. 75 checks.
+  Files: tests/registry.test.sh
+
 ## [0.3.0] - 2026-10-07 — Summaries on read
 
 ### Changed

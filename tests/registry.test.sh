@@ -86,6 +86,24 @@ ok "drain has sender"       'printf "%s" "$out" | grep -q "alpha-1"'
 ok "inbox empty after drain" '[ "$(mw_inbox_count alpha-2)" = "0" ]'
 ok "second drain empty"     '[ -z "$(mw_drain_inbox alpha-2)" ]'
 
+echo "== orphan inboxes: dropped only after the recipient is gone AND past MW_INBOX_TTL =="
+ok "default inbox TTL is 24h"  '[ "$MW_INBOX_TTL" = "86400" ]'
+mw_send_message "gone-old"   "alpha-1" "/repo/x" "nobody will read this"
+mw_send_message "gone-fresh" "alpha-1" "/repo/x" "recipient may re-register"
+mw_send_message "alpha-1"    "alpha-2" "/repo/x" "live recipient, old mail"
+touch -t 200001010000 "$MW_MESSAGES_DIR"/gone-old/*.json "$MW_MESSAGES_DIR"/alpha-1/*.json
+mkdir -p "$MW_MESSAGES_DIR/gone-empty"
+mw_purge_stale
+ok "old orphan inbox dropped"       '[ ! -d "$MW_MESSAGES_DIR/gone-old" ]'
+ok "drop is logged"                 'grep -q "orphan inbox: gone-old" "$MW_LOG"'
+ok "empty orphan dir dropped"       '[ ! -d "$MW_MESSAGES_DIR/gone-empty" ]'
+ok "fresh orphan kept (grace)"      '[ "$(mw_inbox_count gone-fresh)" = "1" ]'
+ok "live recipient keeps old mail"  '[ "$(mw_inbox_count alpha-1)" = "1" ]'
+mw_drain_inbox alpha-1 >/dev/null
+out="$(bash "$HERE/../commands/mw-status.sh")"
+ok "status flags orphan inbox"      'printf "%s" "$out" | grep "gone-fre" | grep -q "recipient not registered"'
+rm -rf "$MW_MESSAGES_DIR/gone-fresh"
+
 echo "== broadcast reaches others, skips self =="
 while IFS= read -r t; do [ -n "$t" ] && mw_send_message "$t" "alpha-1" "/repo/x" "bcast"; done \
   < <(mw_resolve_sids all /repo/x alpha-1)
