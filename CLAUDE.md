@@ -4,10 +4,12 @@ Dev notes for working on this Claude Code plugin. Read this before editing.
 
 ## What it is
 
-A Claude Code plugin that detects concurrent sessions on the same repo and lets
+A Claude Code plugin that detects concurrent sessions on the same repo and helps
 them coordinate: collision banners, per-session self-summaries (generated at read
-time by `/mw-status` via OpenRouter), direct messages (`/mw-send`), and
-subscriptions (`/mw-watch`). Pure bash + `jq` + `curl`, no build.
+time by `/mw-status` via OpenRouter), subscriptions (`/mw-watch`), and each
+session's native Claude Code name in every roster. Session-to-session chat is
+Claude Code's native `SendMessage`; the plugin's `/mw-send` was removed in 0.4.0.
+Pure bash + `jq` + `curl`, no build.
 
 ## ⚠️ Three copies — edit the right ones
 
@@ -32,18 +34,18 @@ and commit. Confirm LIVE is what's running via a registry entry's `source` field
 
 - `lib/registry.sh` — all state helpers, sourced by every hook. State lives under
   `$MW_STATE` (default `~/.claude/state/multi-agent-watch/`): `sessions/<sid>.json`
-  (one per session), `messages/<sid>/*.json` (inboxes), `summaries/<sid>.json`
+  (one per session), `messages/<sid>/*.json` (inboxes for `/mw-watch` pings), `summaries/<sid>.json`
   (raw OpenRouter response of the last summary call), `locks/` (per-session
   summary locks), `multi-agent-watch.log`.
 - Hooks (`hooks/hooks.json` wires them):
   - `SessionStart` → `session-start.sh`: register + collision banner/notify/context
     + set known-others baseline.
   - `UserPromptSubmit` + `PostToolUse` → `monitor.sh`: heartbeat, purge, **drain
-    inbox** (messages + watch pings), inject roster delta + siblings' summaries.
+    inbox** (watch pings), inject roster delta + siblings' summaries and native names.
   - `Stop` → `heartbeat.sh` (heartbeat refresh only). `summarize.sh` is a
     deprecated no-op kept for sessions started under the ≤0.2.2 hooks.json.
   - `SessionEnd` → `session-end.sh` → `mw_remove_session`.
-- `commands/` — `/mw-status`, `/mw-send`, `/mw-watch` (`.md` = slash command,
+- `commands/` — `/mw-status`, `/mw-watch` (`.md` = slash command,
   `.sh` = implementation).
 - `tests/registry.test.sh` — `bash tests/registry.test.sh` (exit 0 = green). Run it
   after any `registry.sh` change.
@@ -79,6 +81,12 @@ known_others_at, summary, summary_at, watchers[]`.
 - **Raw before parse.** `mw_summary_call` writes the raw response to
   `summaries/<sid>.json` before extracting content. The key goes through
   `curl -K <(…)` so it stays out of `ps` argv.
+- **Native names are read-only lookups.** `mw_native_name` reads Claude Code's
+  `$MW_CC_SESSIONS_DIR/<ppid>.json` (our entry's `ppid` is the claude process)
+  and accepts the `name` only when its `sessionId` matches, since pids get
+  recycled. `monitor.sh` annotates only when the roster changed, never on every
+  fire. Never write into Claude Code's registry. Tests point
+  `MW_CC_SESSIONS_DIR` at a temp dir.
 - **Inbox drain before early-exit.** `monitor.sh` drains messages/watch-pings
   *before* the roster-unchanged early return, or messages would only arrive when
   the roster changes.

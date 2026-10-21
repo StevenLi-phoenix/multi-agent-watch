@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21 — Native SendMessage replaces /mw-send
+
+### Removed
+- `/mw-send` (`commands/mw-send.md`, `commands/mw-send.sh`). Claude Code now messages between local sessions natively with `SendMessage` / `ListAgents`, so the plugin's own chat channel only duplicated it. The inbox remains as the delivery channel for `/mw-watch` pings. The `monitor` injection no longer ends with a `Reply: /mw-send …` hint.
+  Files: commands/mw-send.md, commands/mw-send.sh, hooks/monitor.sh
+
+### Added
+- Rosters print each session's native Claude Code name (`name=temp-dd`), the address `SendMessage` uses. This covers the collision banner and context, `monitor` deltas, and `/mw-status`. The name comes from Claude Code's live-session registry `~/.claude/sessions/<ppid>.json` and is accepted only when its `sessionId` matches. The location can be overridden with `MW_CC_SESSIONS_DIR`. The collision context and `monitor` delta tell the model to coordinate through `SendMessage`.
+  Files: lib/registry.sh (new `mw_native_name`, `mw_add_native_names`), hooks/session-start.sh, hooks/monitor.sh, commands/mw-status.sh
+
+### Changed
+- Delivered inbox items are labelled "watch notification(s)" instead of "message(s) from sibling session(s)", in the injected context, the terminal banner, the desktop notification and `/mw-status`'s pending list.
+  Files: hooks/monitor.sh, commands/mw-status.sh
+
+### Tests
+- Native-name lookup (match, recycled pid, missing entry, array annotation), `/mw-status` showing names, `session-start` and `monitor` hook output (names, `SendMessage` pointer, watch ping without reply hint, quiet on no change). The `/mw-send` broadcast checks are gone. The suite points `MW_CC_SESSIONS_DIR` at a temp dir. 89 checks.
+  Files: tests/registry.test.sh
+
 ## [0.3.1] - 2026-10-07 — Orphan inbox cleanup
 
 ### Fixed

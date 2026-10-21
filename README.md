@@ -1,9 +1,10 @@
 # multi-agent-watch
 
 Claude Code plugin that detects when multiple Claude Code sessions are working on
-the same repository concurrently — and lets them **coordinate**: each session
-publishes a one-line self-summary of what it's doing, and you can leave direct
-messages for another running session.
+the same repository concurrently — and helps them **coordinate**: each session
+publishes a one-line self-summary of what it's doing, rosters carry each
+sibling's Claude Code name so you can message it with the native `SendMessage`
+tool, and you can subscribe to another session's progress.
 
 ## What it does
 
@@ -25,15 +26,13 @@ messages for another running session.
 - The raw API response is saved to `summaries/<session-id>.json` before parsing; cost, latency and failures go to the log. The `/mw-status` footer shows the model, the cache window and a tally (`2 cached, 1 regenerated`).
 - Collision banners and `monitor` deltas show the last stored `doing: …` line for each sibling.
 
-### Direct messages (留言)
-- `/mw-send <session-id-prefix | all> <message>` leaves a note for another active session on the same repo.
-- The recipient's `monitor` hook delivers the message (and deletes it) into its context on its next prompt or tool use.
-- Mail for a session that has left is kept for `MW_INBOX_TTL` (24h) after its last message, in case the session comes back under the same id. After that it is purged and the purge is logged.
-- `all` broadcasts to every other session on your repo (you are excluded). A prefix targets specific session(s).
-- Sender identity comes from `$CLAUDE_CODE_SESSION_ID`.
+### Talking to a sibling: native `SendMessage`
+- Claude Code messages between local sessions natively (`SendMessage` / `ListAgents`), addressed by a session name such as `temp-dd`. The plugin's own `/mw-send` was removed in 0.4.0 in favour of it.
+- Every roster (collision banner, `monitor` delta, `/mw-status`) prints `name=<native name>` next to each session id, read from Claude Code's live-session registry (`~/.claude/sessions/<pid>.json`, matched by session id). The session that hits a collision can therefore message the sibling it collides with directly.
 
 ### Subscriptions (watch a session)
-- `/mw-watch <session-id-prefix>` subscribes you to another session. While subscribed you get a message (delivered through the same monitor drain) when that session **changes its self-summary** or **ends**.
+- `/mw-watch <session-id-prefix>` subscribes you to another session. While subscribed you get a notification, injected by the `monitor` hook on your next prompt or tool use, when that session **changes its self-summary** or **ends**.
+- Notifications for a session that has left are kept for `MW_INBOX_TTL` (24h), in case it comes back under the same id. After that they are purged and the purge is logged.
 - `/mw-watch --list` shows who you're watching; `/mw-watch --stop <prefix>` unsubscribes.
 - Watchers are stored on the watched session's entry and fan out on summary-change / removal (including stale-purge). Subscriptions **auto-clear on SessionEnd** and dead watchers are pruned lazily.
 - Turns polling into push — e.g. waiting for a sibling to finish a prerequisite instead of re-reading a coordination file.
@@ -48,8 +47,7 @@ auto-registered from `hooks/hooks.json`.
 
 ## Slash commands
 
-- `/mw-status` — list all registered sessions grouped by repo, flagging collisions; shows each session's self-summary, watcher count, and any pending (undelivered) messages.
-- `/mw-send <to> <message>` — leave a message for another session (`<to>` is an 8-char session-id prefix or `all`).
+- `/mw-status` — list all registered sessions grouped by repo, flagging collisions; shows each session's native name, self-summary, watcher count, and any pending (undelivered) watch notifications.
 - `/mw-watch <to>` / `/mw-watch --list` / `/mw-watch --stop <to>` — subscribe to a session's summary-change / end events.
 
 ## Config (env vars)
@@ -60,6 +58,7 @@ auto-registered from `hooks/hooks.json`.
 | `MW_STALE_SEC`       | `600`                               | heartbeat staleness threshold (seconds)                            |
 | `MW_QUIET`           | `0`                                 | `1` suppresses desktop notification                                |
 | `MW_INBOX_TTL`       | `86400`                             | drop an unregistered recipient's inbox this long after its last message |
+| `MW_CC_SESSIONS_DIR` | `~/.claude/sessions`                | Claude Code's live-session registry, read for native names         |
 | `OPENROUTER_API_KEY` | —                                   | key for the summary call; unset ⇒ summaries skipped (footer says so) |
 | `MW_SUMMARY_MODEL`   | `deepseek/deepseek-v4.1-flash`      | OpenRouter model slug used for self-summaries                      |
 | `MW_SUMMARY_PERIOD`  | `900`                               | summary cache lifetime in seconds (15 min)                         |
@@ -70,7 +69,7 @@ auto-registered from `hooks/hooks.json`.
 ## Files
 
 - `~/.claude/state/multi-agent-watch/sessions/<session-id>.json` — one per active session (includes `summary`)
-- `~/.claude/state/multi-agent-watch/messages/<recipient-sid>/*.json` — queued, undelivered messages
+- `~/.claude/state/multi-agent-watch/messages/<recipient-sid>/*.json` — queued, undelivered `/mw-watch` notifications
 - `~/.claude/state/multi-agent-watch/summaries/<session-id>.json` — raw OpenRouter response of the last summary call
 - `~/.claude/state/multi-agent-watch/locks/` — per-session summary locks
 - `~/.claude/state/multi-agent-watch/multi-agent-watch.log` — diagnostic log
@@ -82,7 +81,8 @@ bash tests/registry.test.sh   # exit 0 = all green
 ```
 
 Covers atomic writes under concurrency, purge safety (never deletes a fresh
-mid-write file), message send/drain, recipient resolution, and summary
+mid-write file), notification send/drain, session resolution, native-name
+lookup, the `session-start` and `monitor` hook output, and summary
 generation: the 15-minute cache, idle-skip, failure paths, the parallel
 refresh, and an end-to-end `/mw-status` run against a `file://` fixture. No
 network calls.
@@ -97,6 +97,7 @@ network calls.
 
 ## Changelog
 
+- **0.4.0** — `/mw-send` removed: Claude Code's native `SendMessage` covers session-to-session chat. Rosters now print each session's native `name=` so you can message the sibling you collide with. See CHANGELOG.md.
 - **0.3.1** — purge inboxes of recipients that are gone (24h grace, `MW_INBOX_TTL`); `/mw-status` flags them.
 - **0.3.0** — self-summaries move from a `claude -p` Stop hook to read-time generation in `/mw-status`: DeepSeek V4.1 Flash via OpenRouter, parallel, 15-minute cache plus idle-skip. Also fixes `mw_file_mtime` when GNU coreutils shadows `stat`. See CHANGELOG.md.
 - **0.2.1** — fix `/mw-send` slash quoting so non-ASCII / glob-char messages no longer trip zsh `no matches found` (message passed as one quoted blob, recipient split in-script); `mw_write_session` now merges onto the existing entry so `summary` / `watchers` / `known_others` survive heartbeat rewrites. Adds subscriptions (`/mw-watch`): get pinged when a watched session changes its summary or ends, auto-unsubscribe on SessionEnd; `/mw-status` shows watcher counts.

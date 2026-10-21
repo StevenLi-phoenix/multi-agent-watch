@@ -13,6 +13,9 @@ MW_STALE_SEC="${MW_STALE_SEC:-600}"
 # that was stale-purged while idle (or resumed) and re-registers under its id.
 MW_INBOX_TTL="${MW_INBOX_TTL:-86400}"
 MW_QUIET="${MW_QUIET:-0}"
+# Claude Code's own live-session registry (one <pid>.json per session). Read
+# only, to learn each session's native name for SendMessage.
+MW_CC_SESSIONS_DIR="${MW_CC_SESSIONS_DIR:-$HOME/.claude/sessions}"
 
 # Session self-summary (so sibling sessions learn what each other is doing).
 # Generated ON READ — only when /mw-status runs — via one OpenRouter call per
@@ -216,14 +219,46 @@ mw_remove_session() {
 }
 
 # ---------------------------------------------------------------------------
-# Inter-session messaging ("留言"): leave a note for another live session.
-# One file per message under messages/<recipient_full_sid>/, drained (and
-# deleted) by the recipient's monitor hook on its next prompt / tool use.
+# Native names. Claude Code messages between local sessions itself (the
+# SendMessage / ListAgents tools), addressed by a session name such as
+# "temp-dd". Rosters print that name so a session can reach a sibling it
+# collides with. Our entry's ppid is the claude process, whose registry file is
+# <ppid>.json; the sessionId check guards against a recycled pid.
+# ---------------------------------------------------------------------------
+
+# Print a session's native name, or nothing when Claude Code has no entry.
+mw_native_name() {
+  local sid="$1" ppid
+  ppid="$(jq -r '.ppid // ""' "$MW_SESSIONS_DIR/$sid.json" 2>/dev/null)" || return 0
+  [ -n "$ppid" ] || return 0
+  jq -r --arg s "$sid" 'select(.sessionId == $s) | .name // empty' \
+    "$MW_CC_SESSIONS_DIR/$ppid.json" 2>/dev/null || true
+}
+
+# Read a JSON array of session entries on stdin; print it with .native_name
+# set on each ("" when unknown).
+mw_add_native_names() {
+  local arr sid name names='{}'
+  arr="$(cat)"
+  while IFS= read -r sid; do
+    [ -n "$sid" ] || continue
+    name="$(mw_native_name "$sid")"
+    [ -n "$name" ] || continue
+    names="$(printf '%s' "$names" | jq -c --arg k "$sid" --arg v "$name" '. + {($k): $v}')"
+  done < <(printf '%s' "$arr" | jq -r '.[].session_id // empty' 2>/dev/null)
+  printf '%s' "$arr" | jq --argjson n "$names" 'map(. + {native_name: ($n[.session_id] // "")})'
+}
+
+# ---------------------------------------------------------------------------
+# Inbox: the delivery channel for /mw-watch pings. One file per message under
+# messages/<recipient_full_sid>/, drained (and deleted) by the recipient's
+# monitor hook on its next prompt / tool use. Session-to-session chat goes
+# through Claude Code's native SendMessage (see mw_native_name).
 # ---------------------------------------------------------------------------
 
 mw_inbox_dir() { printf '%s/%s' "$MW_MESSAGES_DIR" "$1"; }
 
-# Resolve a recipient spec to full session_ids, one per line.
+# Resolve a session spec (as given to /mw-watch) to full session_ids, one per line.
 #   spec="all"  -> every registered session; if $2 (repo_key) is non-empty,
 #                  restricted to that repo. $3 (exclude sid) is dropped.
 #   spec=<pfx>  -> sessions whose id starts with <pfx> (repo_key ignored).

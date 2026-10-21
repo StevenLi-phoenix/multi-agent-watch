@@ -22,13 +22,14 @@ fi
 
 tally="$(mw_refresh_summaries)"
 
-jq -s '
+jq -s '.' "${files[@]}" | mw_add_native_names | jq '
   group_by(.repo_key)
   | map({
       repo: .[0].repo_key,
       count: length,
       sessions: map({
         session_id: ((.session_id // "?")[0:8]),
+        native_name: (.native_name // ""),
         cwd: .cwd,
         host: .host,
         pid: .pid,
@@ -40,7 +41,7 @@ jq -s '
       })
     })
   | sort_by(-.count)
-' "${files[@]}" | jq -r '
+' | jq -r '
   def ago: if . == "" then "" else
       (((now - (. | fromdateiso8601)) / 60) | floor) as $m
       | if $m < 1 then "just now" elif $m < 60 then "\($m)m ago" else "\($m / 60 | floor)h ago" end
@@ -48,18 +49,20 @@ jq -s '
   .[] |
   (if .count > 1 then "!! COLLISION" else "ok           " end) as $marker |
   "\($marker) [\(.count)] \(.repo)\n" +
-  (.sessions | map("    - \(.session_id) host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
+  (.sessions | map("    - \(.session_id)"
+     + (if .native_name != "" then " name=\(.native_name)" else "" end)
+     + " host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
      + (if .watchers > 0 then " (watched by \(.watchers))" else "" end)
      + (if .summary != "" then "\n        doing (\(.summary_at | ago)): \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
 '
 
-# Pending (undelivered) messages, grouped by recipient.
+# Pending (undelivered) /mw-watch pings, grouped by recipient.
 shopt -s nullglob
 pending=("$MW_MESSAGES_DIR"/*/*.json)
 shopt -u nullglob
 if [ ${#pending[@]} -gt 0 ]; then
   echo
-  echo "pending messages (not yet delivered):"
+  echo "pending watch notifications (not yet delivered):"
   for d in "$MW_MESSAGES_DIR"/*/; do
     [ -d "$d" ] || continue
     shopt -s nullglob
@@ -68,9 +71,9 @@ if [ ${#pending[@]} -gt 0 ]; then
     [ ${#m[@]} -eq 0 ] && continue
     rid="$(basename "$d")"
     if [ -f "$MW_SESSIONS_DIR/$rid.json" ]; then
-      echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting"
+      echo "    → ${rid:0:8}: ${#m[@]} notification(s) waiting"
     else
-      echo "    → ${rid:0:8}: ${#m[@]} message(s) waiting — recipient not registered (dropped $((MW_INBOX_TTL / 3600))h after the last message unless it comes back)"
+      echo "    → ${rid:0:8}: ${#m[@]} notification(s) waiting — recipient not registered (dropped $((MW_INBOX_TTL / 3600))h after the last message unless it comes back)"
     fi
   done
 fi

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# multi-agent-watch — registry + messaging unit tests.
-# Runs against a throwaway MW_STATE so it never touches the real registry.
+# multi-agent-watch — registry + inbox unit tests.
+# Runs against a throwaway MW_STATE and Claude Code session dir, so it never
+# touches the real registries.
 # Usage: bash tests/registry.test.sh   (exit 0 = all green)
 set -uo pipefail
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mw-test.XXXXXX")"
 export MW_STATE="$TMP"
+export MW_CC_SESSIONS_DIR="$TMP/cc-sessions"   # stands in for ~/.claude/sessions
 export MW_QUIET=1          # no desktop notifications during tests
 export MW_STALE_SEC=600
 
@@ -103,12 +105,6 @@ mw_drain_inbox alpha-1 >/dev/null
 out="$(bash "$HERE/../commands/mw-status.sh")"
 ok "status flags orphan inbox"      'printf "%s" "$out" | grep "gone-fre" | grep -q "recipient not registered"'
 rm -rf "$MW_MESSAGES_DIR/gone-fresh"
-
-echo "== broadcast reaches others, skips self =="
-while IFS= read -r t; do [ -n "$t" ] && mw_send_message "$t" "alpha-1" "/repo/x" "bcast"; done \
-  < <(mw_resolve_sids all /repo/x alpha-1)
-ok "broadcast hit alpha-2"  '[ "$(mw_inbox_count alpha-2)" = "1" ]'
-ok "broadcast skipped self" '[ "$(mw_inbox_count alpha-1)" = "0" ]'
 
 echo "== summary: lock is once-only =="
 ok "first lock acquired"  'mw_try_lock lk-1'
@@ -241,6 +237,50 @@ mw_add_watch "watcher-1" "target-2"
 ok "watching target-2"      '[ "$(mw_watchers target-2)" = "watcher-1" ]'
 mw_remove_session "watcher-1"      # watcher leaves
 ok "auto-unsub on leave"    '[ -z "$(mw_watchers target-2)" ]'
+
+echo "== native names: what Claude Code's SendMessage addresses a session by =="
+rm -f "$MW_SESSIONS_DIR"/*.json
+rm -rf "$MW_MESSAGES_DIR"/*
+mkdir -p "$MW_CC_SESSIONS_DIR"
+set_ppid() { jq --argjson p "$2" '.ppid = $p' "$MW_SESSIONS_DIR/$1.json" | mw_atomic_write "$MW_SESSIONS_DIR/$1.json"; }
+cc_entry() { jq -n --argjson pid "$1" --arg s "$2" --arg n "$3" '{pid:$pid, sessionId:$s, name:$n}' > "$MW_CC_SESSIONS_DIR/$1.json"; }
+mw_write_session "nm-1" "/repo/n" "" m; set_ppid nm-1 111; cc_entry 111 nm-1 temp-aa
+mw_write_session "nm-2" "/repo/n" "" m; set_ppid nm-2 222; cc_entry 222 someone-else temp-bb
+mw_write_session "nm-3" "/repo/n" "" m; set_ppid nm-3 333
+ok "name read via ppid"           '[ "$(mw_native_name nm-1)" = "temp-aa" ]'
+ok "recycled pid -> no name"      '[ -z "$(mw_native_name nm-2)" ]'
+ok "no CC entry -> no name"       '[ -z "$(mw_native_name nm-3)" ]'
+named="$(mw_active_for_repo /repo/n "" | mw_add_native_names)"
+ok "array annotated"              '[ "$(printf "%s" "$named" | jq -r "map(select(.session_id==\"nm-1\"))[0].native_name")" = "temp-aa" ]'
+ok "unknown names are empty"      '[ "$(printf "%s" "$named" | jq "map(select(.native_name==\"\")) | length")" = "2" ]'
+ok "empty array passes through"   '[ "$(printf "[]" | mw_add_native_names | jq -c .)" = "[]" ]'
+out="$(OPENROUTER_API_KEY= bash "$HERE/../commands/mw-status.sh")"
+ok "status shows name"            'printf "%s" "$out" | grep -q "nm-1 name=temp-aa host="'
+
+echo "== /mw-send is gone: chat goes through native SendMessage =="
+ok "no /mw-send command"          '[ ! -e "$HERE/../commands/mw-send.md" ] && [ ! -e "$HERE/../commands/mw-send.sh" ]'
+
+echo "== session-start: collision context names siblings =="
+rm -f "$MW_SESSIONS_DIR"/*.json
+mw_write_session "mon-peer" "/repo/m" "" m; set_ppid mon-peer 444; cc_entry 444 mon-peer temp-peer
+out="$(printf '{"session_id":"ss-new","cwd":"/repo/m"}' | bash "$HERE/../hooks/session-start.sh" 2>/dev/null)"
+ctx="$(printf "%s" "$out" | jq -r .hookSpecificOutput.additionalContext)"
+ok "start context names sibling"  'printf "%s" "$ctx" | grep -q "session=mon-peer name=temp-peer"'
+ok "start context -> SendMessage" 'printf "%s" "$ctx" | grep -q "SendMessage"'
+rm -f "$MW_SESSIONS_DIR/ss-new.json"
+
+echo "== monitor: roster delta names siblings; watch pings carry no reply hint =="
+mw_write_session "mon-self" "/repo/m" "" m
+mw_send_message "mon-self" "watch:mon-peer" "/repo/m" "🔔 watched session mon-peer ended: done"
+out="$(printf '{"session_id":"mon-self","cwd":"/repo/m","hook_event_name":"PostToolUse"}' | bash "$HERE/../hooks/monitor.sh" 2>/dev/null)"
+ctx="$(printf "%s" "$out" | jq -r .hookSpecificOutput.additionalContext)"
+ok "delta names sibling"          'printf "%s" "$ctx" | grep -q "session=mon-peer name=temp-peer"'
+ok "delta -> SendMessage"         'printf "%s" "$ctx" | grep -q "SendMessage tool, addressed by its name="'
+ok "watch ping delivered"         'printf "%s" "$ctx" | grep -q "1 watch notification(s) for you"'
+ok "no /mw-send reply hint"       '! printf "%s" "$ctx" | grep -q "mw-send"'
+ok "ping drained"                 '[ "$(mw_inbox_count mon-self)" = "0" ]'
+out="$(printf '{"session_id":"mon-self","cwd":"/repo/m","hook_event_name":"PostToolUse"}' | bash "$HERE/../hooks/monitor.sh" 2>/dev/null)"
+ok "quiet when nothing changed"   '[ -z "$out" ]'
 
 echo "----------------------------------------"
 echo "$pass passed, $fail failed"
