@@ -97,6 +97,7 @@ network calls.
 
 ## Changelog
 
+- **0.4.1** — SessionStart hook 206 ms → ~60 ms (one `jq` per stage instead of one per session/file, async desktop notification); `monitor` / `heartbeat` share the same faster helpers. See CHANGELOG.md.
 - **0.4.0** — `/mw-send` removed: Claude Code's native `SendMessage` covers session-to-session chat. Rosters now print each session's native `name=` so you can message the sibling you collide with. See CHANGELOG.md.
 - **0.3.1** — purge inboxes of recipients that are gone (24h grace, `MW_INBOX_TTL`); `/mw-status` flags them.
 - **0.3.0** — self-summaries move from a `claude -p` Stop hook to read-time generation in `/mw-status`: DeepSeek V4.1 Flash via OpenRouter, parallel, 15-minute cache plus idle-skip. Also fixes `mw_file_mtime` when GNU coreutils shadows `stat`. See CHANGELOG.md.

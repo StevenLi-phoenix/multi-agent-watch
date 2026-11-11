@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-11 — Lighter SessionStart
+
+### Changed
+- `session-start.sh` takes ~60 ms instead of ~206 ms (measured against the same registry, 15 runs each): one `jq` per stage instead of one per session or file, stdin fields read with a single `jq` + `eval @sh`, banner / context / baseline built in one `jq`. Output is byte-compatible with 0.4.0 (stdout JSON, stderr banner, session entry diffed on identical state).
+  Files: hooks/session-start.sh
+- `mw_purge_stale`, `mw_active_for_repo`, `mw_add_native_names` read all session files with a single `jq` and fall back to the previous per-file path when any file is unparseable; `mw_write_session` merges the existing entry in the same `jq`, takes an optional repo key (5th arg) and no longer forks `hostname` / `id`. `monitor.sh` and `heartbeat.sh` run on every prompt / tool call and get the same savings.
+  Files: lib/registry.sh
+- `mw_notify_desktop` fires the notification in the background (`terminal-notifier` alone cost ~110 ms of hook time).
+  Files: lib/registry.sh
+
+### Added
+- `mw_tick`: one `date` call whose result `mw_log`, `mw_now`, `mw_now_epoch` and the registry writers reuse (used by session-start).
+  Files: lib/registry.sh
+
+### Tests
+- 11 new checks: repo filter and self exclusion, corrupt-file fallback, stale purge through the single-`jq` path, native names (join, no-ppid fallback, no CC files), explicit repo key, shared clock, and a slow fake notifier proving the hook does not wait for it. 100 checks, green under both gnubin and BSD PATHs.
+  Files: tests/registry.test.sh
+
+### Docs
+- CLAUDE.md: SOURCE is what Claude Code loads (hook paths in `--debug-file` show it); added the hook-weight rules.
+  Files: CLAUDE.md
+
 ## [0.4.0] - 2026-10-21 — Native SendMessage replaces /mw-send
 
 ### Removed

@@ -282,6 +282,43 @@ ok "ping drained"                 '[ "$(mw_inbox_count mon-self)" = "0" ]'
 out="$(printf '{"session_id":"mon-self","cwd":"/repo/m","hook_event_name":"PostToolUse"}' | bash "$HERE/../hooks/monitor.sh" 2>/dev/null)"
 ok "quiet when nothing changed"   '[ -z "$out" ]'
 
+echo "== fast paths: one jq for the roster, per-file fallback on corrupt data =="
+rm -f "$MW_SESSIONS_DIR"/*.json
+rm -rf "$MW_MESSAGES_DIR"/*
+rm -f "$MW_CC_SESSIONS_DIR"/*.json
+mw_write_session "fp-1" "/repo/f" "" m; set_ppid fp-1 501; cc_entry 501 fp-1 temp-f1
+mw_write_session "fp-2" "/repo/f" "" m
+mw_write_session "fp-other" "/repo/g" "" m
+ok "active: repo filter + self exclusion"  '[ "$(mw_active_for_repo /repo/f fp-2 | jq -r "map(.session_id) | join(\",\")")" = "fp-1" ]'
+ok "active: no sessions -> []"             '[ "$(MW_SESSIONS_DIR=$TMP/none mw_active_for_repo /repo/f "")" = "[]" ]'
+printf '{not json' > "$MW_SESSIONS_DIR/fp-bad.json"
+ok "active: corrupt file skipped, others kept" '[ "$(mw_active_for_repo /repo/f "" | jq -r "map(.session_id) | sort | join(\",\")")" = "fp-1,fp-2" ]'
+touch -t 200001010000 "$MW_SESSIONS_DIR/fp-bad.json"
+mw_purge_stale
+ok "purge: corrupt+old removed, healthy kept"  '[ ! -e "$MW_SESSIONS_DIR/fp-bad.json" ] && [ -e "$MW_SESSIONS_DIR/fp-1.json" ]'
+old_hb=$(( $(date -u +%s) - MW_STALE_SEC - 60 ))
+jq --argjson h "$old_hb" '.last_heartbeat_epoch = $h' "$MW_SESSIONS_DIR/fp-2.json" | mw_atomic_write "$MW_SESSIONS_DIR/fp-2.json"
+mw_purge_stale
+ok "purge: stale heartbeat removed (single-jq path)"  '[ ! -e "$MW_SESSIONS_DIR/fp-2.json" ] && [ -e "$MW_SESSIONS_DIR/fp-1.json" ]'
+ok "names: single-jq join matches"         '[ "$(mw_active_for_repo /repo/f "" | mw_add_native_names | jq -r ".[0].native_name")" = "temp-f1" ]'
+ok "names: entry without ppid falls back to the session file" '[ "$(printf "[{\"session_id\":\"fp-1\"}]" | mw_add_native_names | jq -r ".[0].native_name")" = "temp-f1" ]'
+rm -f "$MW_CC_SESSIONS_DIR"/*.json
+ok "names: no CC session files -> empty names" '[ "$(mw_active_for_repo /repo/f "" | mw_add_native_names | jq -r ".[0].native_name")" = "" ]'
+mw_write_session "fp-key" "/repo/f/sub/dir" "" m "/forced/key"
+ok "write_session: explicit repo key (5th arg) wins" '[ "$(jq -r .repo_key "$MW_SESSIONS_DIR/fp-key.json")" = "/forced/key" ]'
+mw_tick
+ok "tick: mw_now / mw_now_epoch reuse one clock" '[ "$(mw_now)" = "$MW_TICK_ISO" ] && [ "$(mw_now_epoch)" = "$MW_TICK_EPOCH" ]'
+unset MW_TICK_EPOCH MW_TICK_ISO
+
+echo "== desktop notification never blocks the hook =="
+mkdir -p "$TMP/fakebin"
+printf '#!/bin/sh\nsleep 3\n' > "$TMP/fakebin/terminal-notifier"; chmod +x "$TMP/fakebin/terminal-notifier"
+mw_write_session "an-peer" "/repo/an" "" m
+t0=$(date -u +%s)
+printf '{"session_id":"an-new","cwd":"/repo/an","source":"startup"}' | MW_QUIET=0 PATH="$TMP/fakebin:$PATH" bash "$HERE/../hooks/session-start.sh" >/dev/null 2>&1
+t1=$(date -u +%s)
+ok "session-start returns while the notifier still sleeps (<=1s vs 3s)" '[ $((t1 - t0)) -le 1 ]'
+
 echo "----------------------------------------"
 echo "$pass passed, $fail failed"
 rm -rf "$TMP"

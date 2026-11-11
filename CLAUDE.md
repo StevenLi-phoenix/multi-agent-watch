@@ -18,17 +18,30 @@ This plugin exists in three places; they drift if you forget:
 1. **SOURCE (this repo, canonical):** `~/Codes/claude-plugins-local/multi-agent-watch/`
    — the `local` directory-marketplace source (`settings.json` →
    `extraKnownMarketplaces.local`). Git repo. **Commit changes here.**
-2. **LIVE (installed, what actually runs):**
+2. **CACHE (installed copy):**
    `~/.claude/plugins/cache/local/multi-agent-watch/0.1.0/` — enabled via
-   `multi-agent-watch@local`. Edits here take effect immediately for running
-   sessions; overwritten on reinstall. (Dir name stays `0.1.0` regardless of
-   `plugin.json` version — it's just the install path.)
+   `multi-agent-watch@local`; overwritten on reinstall. (Dir name stays `0.1.0`
+   regardless of `plugin.json` version — it's just the install path.) As of
+   Claude Code 2.1.322 the hook commands resolve to SOURCE (`claude --debug-file`
+   logs `Hooks: SessionStart:startup [bash ~/Codes/claude-plugins-local/multi-agent-watch/hooks/session-start.sh]`),
+   so SOURCE is what runs; keep CACHE identical with `cp` in case an older loader
+   uses it.
 3. **STALE leftover (ignore):** `~/.claude/plugins/multi-agent-watch/` — old,
    unreferenced.
 
-Workflow: develop in LIVE for instant feedback, then `cp` changed files to SOURCE
-and commit. Confirm LIVE is what's running via a registry entry's `source` field
-(`monitor` is written only by the cache copy's `monitor.sh`).
+Workflow: edit SOURCE, run the tests, commit, then `cp` the changed files to CACHE.
+To confirm which copy runs, start `claude --debug-file <path>` and grep the log for
+`Hooks: SessionStart`: the bracketed command shows the path (and `(Ns ms)` per hook).
+
+### Hook weight (SessionStart is on the startup critical path)
+
+SessionStart hooks run in parallel and Claude Code waits for the slowest, so
+`session-start.sh` must stay light (206 ms → ~60 ms after the rewrite). Rules:
+one `jq` per stage, never one per session or per file; fast path first, per-file
+fallback when jq cannot parse something; reuse `mw_tick` instead of forking `date`;
+desktop notifications are fire-and-forget (`mw_notify_desktop` backgrounds them).
+`monitor.sh` and `heartbeat.sh` run on every prompt / tool call and share the same
+lib functions, so they get the same savings.
 
 ## Architecture
 

@@ -31,8 +31,21 @@ MW_OPENROUTER_URL="${MW_OPENROUTER_URL:-https://openrouter.ai/api/v1/chat/comple
 MW_SUMMARIES_DIR="$MW_STATE/summaries"   # raw API response per session
 
 mw_init() {
-  mkdir -p "$MW_SESSIONS_DIR" "$MW_MESSAGES_DIR" "$MW_LOCKS_DIR" "$MW_SUMMARIES_DIR" 2>/dev/null || true
+  # Hot path: the dirs almost always exist, so skip the mkdir fork.
+  if ! { [ -d "$MW_SESSIONS_DIR" ] && [ -d "$MW_MESSAGES_DIR" ] && [ -d "$MW_LOCKS_DIR" ] && [ -d "$MW_SUMMARIES_DIR" ]; }; then
+    mkdir -p "$MW_SESSIONS_DIR" "$MW_MESSAGES_DIR" "$MW_LOCKS_DIR" "$MW_SUMMARIES_DIR" 2>/dev/null || true
+  fi
   : >> "$MW_LOG" 2>/dev/null || true
+}
+
+# One `date` fork for a short-lived hook: sets MW_TICK_EPOCH / MW_TICK_ISO, which mw_log, mw_now,
+# mw_now_epoch and the registry writers reuse instead of forking `date` again. Only call it from
+# hooks that exit within a second or two (session-start); long-lived callers leave it unset.
+mw_tick() {
+  local t
+  t="$(date -u '+%s %Y-%m-%dT%H:%M:%SZ')"
+  MW_TICK_EPOCH="${t%% *}"
+  MW_TICK_ISO="${t#* }"
 }
 
 # Atomically replace $1 with content read from stdin (write tmp + rename).
@@ -48,12 +61,12 @@ mw_atomic_write() {
 }
 
 mw_log() {
-  printf '[%s] [%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${MW_HOOK:-?}" "$*" \
+  printf '[%s] [%s] %s\n' "${MW_TICK_ISO:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}" "${MW_HOOK:-?}" "$*" \
     >> "$MW_LOG" 2>/dev/null || true
 }
 
-mw_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
-mw_now_epoch() { date -u '+%s'; }
+mw_now() { if [ -n "${MW_TICK_ISO:-}" ]; then printf '%s\n' "$MW_TICK_ISO"; else date -u '+%Y-%m-%dT%H:%M:%SZ'; fi; }
+mw_now_epoch() { if [ -n "${MW_TICK_EPOCH:-}" ]; then printf '%s\n' "$MW_TICK_EPOCH"; else date -u '+%s'; fi; }
 
 # Repo identity: prefer git toplevel so subdirs of one repo collapse to one key.
 mw_repo_key() {
@@ -78,37 +91,57 @@ mw_file_mtime() {
   case "$m" in ''|*[!0-9]*) mw_now_epoch ;; *) printf '%s' "$m" ;; esac
 }
 
+# Judge one session file by its heartbeat text and purge it if stale/corrupt.
+#   $1 file  $2 heartbeat (as printed by jq; "" when missing)  $3 now (epoch)  $4 stale threshold (epoch)
+_mw_purge_one() {
+  local f="$1" hb="$2" now="$3" stale_threshold="$4" mtime sid
+  sid="${f##*/}"; sid="${sid%.json}"
+  case "$hb" in
+    ''|*[!0-9]*)
+      # Unparseable or missing heartbeat. This can be a genuinely corrupt
+      # file OR a file caught mid-write by a racing writer. Only delete it if
+      # it's also OLD on disk — a fresh one is almost certainly mid-write and
+      # will be valid a moment later. (Atomic writes make this rare; this is
+      # the belt to that suspenders.)
+      mtime="$(mw_file_mtime "$f")"
+      if [ $((now - mtime)) -gt "$MW_STALE_SEC" ]; then
+        mw_log "purge corrupt (old): $f"
+        mw_remove_session "$sid"
+      else
+        mw_log "skip corrupt (fresh, likely mid-write): $f"
+      fi
+      ;;
+    *)
+      if [ "$hb" -lt "$stale_threshold" ]; then
+        mw_log "purge stale: $f hb=$hb threshold=$stale_threshold"
+        mw_remove_session "$sid"  # notifies watchers it ended
+      fi
+      ;;
+  esac
+}
+
 mw_purge_stale() {
-  local now stale_threshold hb f mtime
-  now="$(mw_now_epoch)"
+  local now stale_threshold hb f hbs files
+  now="${MW_TICK_EPOCH:-$(mw_now_epoch)}"
   stale_threshold=$((now - MW_STALE_SEC))
   shopt -s nullglob
-  for f in "$MW_SESSIONS_DIR"/*.json; do
-    hb="$(jq -r '.last_heartbeat_epoch // ""' "$f" 2>/dev/null || printf '')"
-    case "$hb" in
-      ''|*[!0-9]*)
-        # Unparseable or missing heartbeat. This can be a genuinely corrupt
-        # file OR a file caught mid-write by a racing writer. Only delete it if
-        # it's also OLD on disk — a fresh one is almost certainly mid-write and
-        # will be valid a moment later. (Atomic writes make this rare; this is
-        # the belt to that suspenders.)
-        mtime="$(mw_file_mtime "$f")"
-        if [ $((now - mtime)) -gt "$MW_STALE_SEC" ]; then
-          mw_log "purge corrupt (old): $f"
-          mw_remove_session "$(basename "$f" .json)"
-        else
-          mw_log "skip corrupt (fresh, likely mid-write): $f"
-        fi
-        ;;
-      *)
-        if [ "$hb" -lt "$stale_threshold" ]; then
-          mw_log "purge stale: $f hb=$hb threshold=$stale_threshold"
-          mw_remove_session "$(basename "$f" .json)"  # notifies watchers it ended
-        fi
-        ;;
-    esac
-  done
+  files=("$MW_SESSIONS_DIR"/*.json)
   shopt -u nullglob
+  if [ "${#files[@]}" -gt 0 ]; then
+    # Fast path: ONE jq reads every heartbeat. A file jq cannot parse makes it exit
+    # non-zero; then fall back to judging each file on its own (one jq per file).
+    if hbs="$(jq -r '[input_filename, ((.last_heartbeat_epoch // "") | tostring)] | @tsv' "${files[@]}" 2>/dev/null)"; then
+      while IFS=$'\t' read -r f hb; do
+        [ -n "$f" ] || continue
+        _mw_purge_one "$f" "$hb" "$now" "$stale_threshold"
+      done <<< "$hbs"
+    else
+      for f in "${files[@]}"; do
+        hb="$(jq -r '.last_heartbeat_epoch // ""' "$f" 2>/dev/null || printf '')"
+        _mw_purge_one "$f" "$hb" "$now" "$stale_threshold"
+      done
+    fi
+  fi
   mw_purge_orphan_inboxes
 }
 
@@ -138,7 +171,18 @@ mw_purge_orphan_inboxes() {
 # Print JSON array of registered sessions matching repo_key, excluding session_id ($2).
 mw_active_for_repo() {
   local repo_key="$1" exclude_session="${2:-}"
-  local out='[]' entry f
+  local out='[]' entry f files fast
+  shopt -s nullglob
+  files=("$MW_SESSIONS_DIR"/*.json)
+  shopt -u nullglob
+  if [ "${#files[@]}" -eq 0 ]; then printf '[]'; return 0; fi
+  # Fast path: one jq slurps every session file. If any file is unparseable jq fails
+  # and the per-file loop below skips just the bad ones, as before.
+  if fast="$(jq -sc --arg key "$repo_key" --arg excl "$exclude_session" \
+      'map(select(.repo_key == $key and .session_id != $excl))' "${files[@]}" 2>/dev/null)"; then
+    printf '%s' "$fast"
+    return 0
+  fi
   shopt -s nullglob
   for f in "$MW_SESSIONS_DIR"/*.json; do
     if ! entry="$(jq -ec --arg key "$repo_key" --arg excl "$exclude_session" \
@@ -152,36 +196,27 @@ mw_active_for_repo() {
   printf '%s' "$out"
 }
 
+# $5 (optional) is the repo key when the caller already computed it (saves a git fork).
 mw_write_session() {
-  local session_id="$1" cwd="$2" transcript="$3" source="$4"
-  local repo_key file now now_epoch started host user base
-  repo_key="$(mw_repo_key "$cwd")"
+  local session_id="$1" cwd="$2" transcript="$3" source="$4" repo_key="${5:-}"
+  local file now now_epoch host user out tmp
+  local -a jqargs
+  [ -n "$repo_key" ] || repo_key="$(mw_repo_key "$cwd")"
   file="$MW_SESSIONS_DIR/$session_id.json"
-  now="$(mw_now)"
-  now_epoch="$(mw_now_epoch)"
-  host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
-  user="$(id -un 2>/dev/null || echo unknown)"
-  # Merge onto the existing entry so fields written by other functions
-  # (summary, known_others_*, and anything added later) are preserved. Rebuild
-  # from {} only when there's no parseable prior entry.
-  base="$(jq -c '.' "$file" 2>/dev/null)" || base=""
-  [ -z "$base" ] && base='{}'
-  started="$(printf '%s' "$base" | jq -r '.started_at // ""' 2>/dev/null || true)"
-  [ -z "${started:-}" ] && started="$now"
-  printf '%s' "$base" | jq \
-    --arg sid "$session_id" \
-    --arg cwd "$cwd" \
-    --arg key "$repo_key" \
-    --argjson pid "$$" \
-    --argjson ppid "$PPID" \
-    --arg host "$host" \
-    --arg user "$user" \
-    --arg tt "$transcript" \
-    --arg src "$source" \
-    --arg started "$started" \
-    --arg now "$now" \
-    --argjson now_epoch "$now_epoch" \
-    '. + {
+  now="${MW_TICK_ISO:-$(mw_now)}"
+  now_epoch="${MW_TICK_EPOCH:-$(mw_now_epoch)}"
+  host="${HOSTNAME:-}"; host="${host%%.*}"
+  [ -n "$host" ] || host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+  user="${USER:-}"
+  [ -n "$user" ] || user="$(id -un 2>/dev/null || echo unknown)"
+  jqargs=(--arg sid "$session_id" --arg cwd "$cwd" --arg key "$repo_key"
+          --argjson pid "$$" --argjson ppid "$PPID" --arg host "$host" --arg user "$user"
+          --arg tt "$transcript" --arg src "$source" --arg now "$now" --argjson now_epoch "$now_epoch")
+  # Merge onto the existing entry (read by the same jq) so fields written by other
+  # functions (summary, known_others_*, and anything added later) are preserved.
+  # Rebuild from {} only when there's no parseable prior entry.
+  local prog='(if type == "object" then . else {} end) as $b
+    | $b + {
       session_id: $sid,
       cwd: $cwd,
       repo_key: $key,
@@ -191,10 +226,19 @@ mw_write_session() {
       user: $user,
       transcript_path: $tt,
       source: $src,
-      started_at: $started,
+      started_at: (($b.started_at // "") | tostring | if . == "" then $now else . end),
       last_heartbeat: $now,
       last_heartbeat_epoch: $now_epoch
-    }' 2>/dev/null | mw_atomic_write "$file" || true
+    }'
+  if [ -s "$file" ] && out="$(jq "${jqargs[@]}" "$prog" "$file" 2>/dev/null)" && [ -n "$out" ]; then :
+  else out="$(printf '{}' | jq "${jqargs[@]}" "$prog" 2>/dev/null)" || out=""
+  fi
+  [ -n "$out" ] || return 0
+  tmp="$file.tmp.$$.${RANDOM:-0}"
+  if printf '%s\n' "$out" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null; then :
+  else rm -f "$tmp" 2>/dev/null || true
+  fi
+  return 0
 }
 
 # Update only the known_others_csv / known_others_at fields, preserving the rest.
@@ -203,7 +247,7 @@ mw_set_known_others() {
   local file="$MW_SESSIONS_DIR/$session_id.json"
   [ -f "$file" ] || return 0
   local tmp="$file.tmp.$$"
-  if jq --arg csv "$csv" --arg now "$(mw_now)" \
+  if jq --arg csv "$csv" --arg now "${MW_TICK_ISO:-$(mw_now)}" \
       '. + {known_others_csv: $csv, known_others_at: $now}' "$file" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$file"
   else
@@ -238,8 +282,26 @@ mw_native_name() {
 # Read a JSON array of session entries on stdin; print it with .native_name
 # set on each ("" when unknown).
 mw_add_native_names() {
-  local arr sid name names='{}'
+  local arr sid name names='{}' ccfiles fast
   arr="$(cat)"
+  # Fast path: ONE jq joins the roster with every Claude Code session file (an entry's
+  # ppid names <ppid>.json; its sessionId must match). Falls back to the per-session
+  # lookup below when the roster entries lack a ppid or any session file is unparseable.
+  shopt -s nullglob
+  ccfiles=("$MW_CC_SESSIONS_DIR"/*.json)
+  shopt -u nullglob
+  if [ "${#ccfiles[@]}" -eq 0 ]; then
+    if printf '%s' "$arr" | jq 'map(. + {native_name: ""})' 2>/dev/null; then return 0; fi
+  elif fast="$(jq -n --argjson arr "$arr" '
+        ($arr | all(.[]; has("ppid"))) as $ok
+        | if $ok | not then error("roster entry without ppid") else . end
+        | [inputs | {f: (input_filename | split("/") | last | sub("\\.json$"; "")), sid: .sessionId, name: (.name // "")}] as $cc
+        | $arr | map(. as $e
+            | . + {native_name: ([$cc[] | select(.f == ($e.ppid | tostring) and .sid == $e.session_id) | .name] | first // "")})
+      ' "${ccfiles[@]}" 2>/dev/null)"; then
+    printf '%s\n' "$fast"
+    return 0
+  fi
   while IFS= read -r sid; do
     [ -n "$sid" ] || continue
     name="$(mw_native_name "$sid")"
@@ -544,13 +606,16 @@ mw_notify_watchers() {
 mw_notify_desktop() {
   [ "$MW_QUIET" = "1" ] && return 0
   local title="$1" message="$2"
+  # Fire and forget: terminal-notifier alone costs ~110 ms, and a hook must not wait for a
+  # desktop toast. stdio is detached so the host does not hold the hook open for the child.
   if command -v terminal-notifier >/dev/null 2>&1; then
     terminal-notifier -title "$title" -message "$message" -group multi-agent-watch \
-      >/dev/null 2>&1 || true
+      >/dev/null 2>&1 </dev/null &
   elif [ "$(uname -s)" = "Darwin" ]; then
     osascript -e "display notification \"${message//\"/\\\"}\" with title \"${title//\"/\\\"}\"" \
-      >/dev/null 2>&1 || true
+      >/dev/null 2>&1 </dev/null &
   elif command -v notify-send >/dev/null 2>&1; then
-    notify-send "$title" "$message" >/dev/null 2>&1 || true
+    notify-send "$title" "$message" >/dev/null 2>&1 </dev/null &
   fi
+  return 0
 }
