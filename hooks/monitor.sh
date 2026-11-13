@@ -69,6 +69,7 @@ if [ "$roster_changed" -eq 1 ]; then
       line="$(printf '%s' "$named_json" | jq -r --arg s "$sid" '.[] | select(.session_id == $s)
         | "  + joined: session=\(.session_id[0:8])"
           + (if (.native_name // "") != "" then " name=\(.native_name)" else "" end)
+          + (if (.native_status // "") != "" then " [\(.native_status)]" else "" end)
           + " host=\(.host) pid=\(.pid) cwd=\(.cwd) started=\(.started_at)"
           + (if (.summary // "") != "" then "\n      doing: \(.summary)" else "" end)' 2>/dev/null)"
       [ -z "$line" ] && line="  + joined: session=${sid:0:8}"
@@ -92,6 +93,7 @@ if [ "$roster_changed" -eq 1 ]; then
     current_block="$(printf '%s' "$named_json" | jq -r '
       map("    - session=\(.session_id[0:8])"
           + (if (.native_name // "") != "" then " name=\(.native_name)" else "" end)
+          + (if (.native_status // "") != "" then " [\(.native_status)]" else "" end)
           + " host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
           + (if (.summary // "") != "" then "\n        doing: \(.summary)" else "" end)) | join("\n")
     ' 2>/dev/null || true)"

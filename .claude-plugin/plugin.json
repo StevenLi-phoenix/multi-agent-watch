@@ -1,6 +1,6 @@
 {
   "name": "multi-agent-watch",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Detect when multiple Claude Code sessions work the same repo concurrently, and help them coordinate: per-session self-summaries generated on read by /mw-status (DeepSeek V4.1 Flash via OpenRouter, 15-minute cache), each sibling's native Claude Code name in every roster for SendMessage, and subscriptions. Collisions surfaced via terminal banner, desktop notification, and context injection.",
   "author": {
     "name": "Shuyu Li",

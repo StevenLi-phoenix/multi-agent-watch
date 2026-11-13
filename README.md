@@ -21,7 +21,7 @@ tool, and you can subscribe to another session's progress.
 
 ### Self-summary (what each session is doing)
 - Generated **on read only**: running `/mw-status` refreshes every session's one-sentence summary right before rendering it. Nothing runs on `Stop` or in the background, so sessions that never look at the roster cost nothing.
-- Each stale session gets one call to **DeepSeek V4.1 Flash via OpenRouter** (`deepseek/deepseek-v4.1-flash`, reasoning off, providers sorted by latency) over a digest of its transcript. Calls run in parallel and are capped at `MW_SUMMARY_TIMEOUT` seconds, so a read takes about one round-trip (~1–2 s). A call costs about $0.00002.
+- Each stale session gets one OpenAI-compatible chat-completions call (default **DeepSeek V4.1 Flash via OpenRouter**, `deepseek/deepseek-v4.1-flash`, reasoning off, providers sorted by latency) over a digest of its transcript. Point `MW_SUMMARY_BASE_URL` at any compatible server and set `MW_SUMMARY_API_KEY` for its key. Calls run in parallel and are capped at `MW_SUMMARY_TIMEOUT` seconds, so a read takes about one round-trip (~1–2 s). A call costs about $0.00002.
 - **15-minute cache**: a summary younger than `MW_SUMMARY_PERIOD` (900 s) is reused as-is. After that it is regenerated only if the session's transcript changed since, so an idle session never pays again. `MW_SUMMARY_REFRESH=1` forces a regeneration. An atomic lock stops two concurrent reads from paying for the same session.
 - The raw API response is saved to `summaries/<session-id>.json` before parsing; cost, latency and failures go to the log. The `/mw-status` footer shows the model, the cache window and a tally (`2 cached, 1 regenerated`).
 - Collision banners and `monitor` deltas show the last stored `doing: …` line for each sibling.
@@ -59,12 +59,14 @@ auto-registered from `hooks/hooks.json`.
 | `MW_QUIET`           | `0`                                 | `1` suppresses desktop notification                                |
 | `MW_INBOX_TTL`       | `86400`                             | drop an unregistered recipient's inbox this long after its last message |
 | `MW_CC_SESSIONS_DIR` | `~/.claude/sessions`                | Claude Code's live-session registry, read for native names         |
-| `OPENROUTER_API_KEY` | —                                   | key for the summary call; unset ⇒ summaries skipped (footer says so) |
-| `MW_SUMMARY_MODEL`   | `deepseek/deepseek-v4.1-flash`      | OpenRouter model slug used for self-summaries                      |
+| `MW_SUMMARY_BASE_URL` | `https://openrouter.ai/api/v1`     | base URL of the OpenAI-compatible server; `/chat/completions` is appended |
+| `MW_SUMMARY_API_KEY` | —                                   | key for the summary call; wins over `OPENROUTER_API_KEY` |
+| `OPENROUTER_API_KEY` | —                                   | fallback key for the summary call; no key ⇒ summaries skipped (footer says so) |
+| `MW_SUMMARY_MODEL`   | `deepseek/deepseek-v4.1-flash`      | model id sent to the summary endpoint                              |
 | `MW_SUMMARY_PERIOD`  | `900`                               | summary cache lifetime in seconds (15 min)                         |
 | `MW_SUMMARY_TIMEOUT` | `20`                                | per-call `curl --max-time` (seconds)                               |
 | `MW_SUMMARY_REFRESH` | unset                               | `1` ignores the cache and regenerates on this read                 |
-| `MW_OPENROUTER_URL`  | OpenRouter chat-completions URL     | endpoint override (tests point it at a `file://` fixture)          |
+| `MW_OPENROUTER_URL`  | unset                               | full endpoint override, beats `MW_SUMMARY_BASE_URL` (tests use a `file://` fixture) |
 
 ## Files
 
@@ -92,7 +94,8 @@ network calls.
 - Single machine — sessions on other hosts won't be visible unless `MW_STATE` points at a shared volume (Tailscale fileshare, Dropbox, NFS, etc.).
 - Repo identity is `git rev-parse --show-toplevel` or absolute cwd. Sibling subdirs of one repo are treated as the same repo.
 - Subagents launched via the `Task` tool share the parent's `session_id` and don't show up as separate sessions (intentional — they aren't independent).
-- Self-summaries need `OPENROUTER_API_KEY` in the environment Claude Code was launched from. Without it they are skipped and collision detection still works.
+- Self-summaries need a key (`MW_SUMMARY_API_KEY` or `OPENROUTER_API_KEY`) in the environment Claude Code was launched from. Without one they are skipped and collision detection still works. Set them under `env` in `~/.claude/settings.json` so every session gets them.
+- Rosters show each session's native name and busy/idle status (`name=temp-aa [busy]`), read from Claude Code's own session registry (the same fields `ListAgents` shows).
 - Summaries are only as fresh as the last `/mw-status`. Banners and monitor deltas show whatever was stored by that read.
 
 ## Changelog

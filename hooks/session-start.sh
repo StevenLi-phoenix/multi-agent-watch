@@ -46,6 +46,7 @@ if [ -n "$others_json" ] && [ "$others_json" != "[]" ]; then
     def roster:
       map("  - session=\(.session_id[0:8])"
           + (if (.native_name // "") != "" then " name=\(.native_name)" else "" end)
+          + (if (.native_status // "") != "" then " [\(.native_status)]" else "" end)
           + " host=\(.host) pid=\(.pid) cwd=\(.cwd) started=\(.started_at) hb=\(.last_heartbeat)"
           + (if (.summary // "") != "" then "\n      doing: \(.summary)" else "" end))
       | join("\n");

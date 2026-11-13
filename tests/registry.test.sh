@@ -201,7 +201,7 @@ out="$(MW_OPENROUTER_URL="file://$fixture" bash "$HERE/../commands/mw-status.sh"
 ok "status shows collision"   'printf "%s" "$out" | grep -q "COLLISION"'
 ok "status shows new summary" 'printf "%s" "$out" | grep -q "wiring the e2e fixture"'
 ok "status shows summary age" 'printf "%s" "$out" | grep -q "just now"'
-ok "status footer: model + cache" 'printf "%s" "$out" | grep -q "deepseek/deepseek-v4.1-flash · cache 15m · 2 regenerated"'
+ok "status footer: model + endpoint + key source + cache" 'printf "%s" "$out" | grep -q "deepseek/deepseek-v4.1-flash @ file://(fixture) · key: OPENROUTER_API_KEY · cache 15m · 2 regenerated"'
 out="$(OPENROUTER_API_KEY= MW_OPENROUTER_URL="file://$fixture" bash "$HERE/../commands/mw-status.sh")"
 ok "second read served from cache" 'printf "%s" "$out" | grep -q "2 cached"'
 
@@ -318,6 +318,35 @@ t0=$(date -u +%s)
 printf '{"session_id":"an-new","cwd":"/repo/an","source":"startup"}' | MW_QUIET=0 PATH="$TMP/fakebin:$PATH" bash "$HERE/../hooks/session-start.sh" >/dev/null 2>&1
 t1=$(date -u +%s)
 ok "session-start returns while the notifier still sleeps (<=1s vs 3s)" '[ $((t1 - t0)) -le 1 ]'
+
+echo "== summary endpoint + key: baseurl, custom key, precedence, no key leak =="
+(
+  unset MW_OPENROUTER_URL MW_SUMMARY_API_KEY
+  MW_SUMMARY_BASE_URL="https://llm.example.test/v1/" OPENROUTER_API_KEY=or-key
+  ok "endpoint derives from base url (trailing slash trimmed)" '[ "$(mw_summary_url)" = "https://llm.example.test/v1/chat/completions" ]'
+  ok "host shown without path or userinfo" '[ "$(MW_SUMMARY_BASE_URL="https://u:p@llm.example.test:8443/v1" mw_summary_host)" = "https://llm.example.test:8443" ]'
+  ok "key falls back to OPENROUTER_API_KEY" '[ "$(mw_summary_key)" = "or-key" ] && [ "$(mw_summary_key_source)" = OPENROUTER_API_KEY ]'
+  MW_SUMMARY_API_KEY=custom-key
+  ok "MW_SUMMARY_API_KEY wins over OPENROUTER_API_KEY" '[ "$(mw_summary_key)" = "custom-key" ] && [ "$(mw_summary_key_source)" = MW_SUMMARY_API_KEY ]'
+  MW_OPENROUTER_URL="file:///fixture.json"
+  ok "MW_OPENROUTER_URL still overrides the derived endpoint" '[ "$(mw_summary_url)" = "file:///fixture.json" ]'
+  unset MW_SUMMARY_API_KEY OPENROUTER_API_KEY MW_OPENROUTER_URL
+  ok "no key -> source none" '[ "$(mw_summary_key_source)" = none ] && [ -z "$(mw_summary_key)" ]'
+)
+
+echo "== native status: busy/idle read from Claude Code's own registry =="
+rm -f "$MW_SESSIONS_DIR"/*.json; rm -f "$MW_CC_SESSIONS_DIR"/*.json
+mw_write_session "st-1" "/repo/st" "" startup
+mw_write_session "st-2" "/repo/st" "" startup
+set_ppid st-1 7001; set_ppid st-2 7002
+printf '{"pid":7001,"sessionId":"st-1","name":"temp-aa","status":"busy"}' > "$MW_CC_SESSIONS_DIR/7001.json"
+printf '{"pid":7002,"sessionId":"st-2","name":"temp-bb","status":"idle"}' > "$MW_CC_SESSIONS_DIR/7002.json"
+joined="$(jq -s '.' "$MW_SESSIONS_DIR"/st-1.json "$MW_SESSIONS_DIR"/st-2.json | mw_add_native_names)"
+ok "fast path: status joined with name" '[ "$(printf "%s" "$joined" | jq -r ".[] | select(.session_id==\"st-1\") | .native_status")" = busy ]'
+ok "fast path: idle sibling" '[ "$(printf "%s" "$joined" | jq -r ".[] | select(.session_id==\"st-2\") | .native_name + \"/\" + .native_status")" = "temp-bb/idle" ]'
+printf 'not json' > "$MW_CC_SESSIONS_DIR/7002.json"
+fallback="$(jq -s '.' "$MW_SESSIONS_DIR"/st-1.json "$MW_SESSIONS_DIR"/st-2.json | mw_add_native_names)"
+ok "fallback path: corrupt sibling file does not drop the busy status" '[ "$(printf "%s" "$fallback" | jq -r ".[] | select(.session_id==\"st-1\") | .native_status")" = busy ]'
 
 echo "----------------------------------------"
 echo "$pass passed, $fail failed"

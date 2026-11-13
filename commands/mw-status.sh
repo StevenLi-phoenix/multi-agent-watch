@@ -30,6 +30,7 @@ jq -s '.' "${files[@]}" | mw_add_native_names | jq '
       sessions: map({
         session_id: ((.session_id // "?")[0:8]),
         native_name: (.native_name // ""),
+        native_status: (.native_status // ""),
         cwd: .cwd,
         host: .host,
         pid: .pid,
@@ -51,6 +52,7 @@ jq -s '.' "${files[@]}" | mw_add_native_names | jq '
   "\($marker) [\(.count)] \(.repo)\n" +
   (.sessions | map("    - \(.session_id)"
      + (if .native_name != "" then " name=\(.native_name)" else "" end)
+     + (if .native_status != "" then " [\(.native_status)]" else "" end)
      + " host=\(.host) pid=\(.pid) cwd=\(.cwd) hb=\(.last_heartbeat)"
      + (if .watchers > 0 then " (watched by \(.watchers))" else "" end)
      + (if .summary != "" then "\n        doing (\(.summary_at | ago)): \(.summary)" else "\n        doing: (no summary yet)" end)) | join("\n"))
@@ -79,9 +81,9 @@ if [ ${#pending[@]} -gt 0 ]; then
 fi
 
 echo
-echo "summaries: $MW_SUMMARY_MODEL · cache $((MW_SUMMARY_PERIOD / 60))m · ${tally:-nothing to do}"
+echo "summaries: $MW_SUMMARY_MODEL @ $(mw_summary_host) · key: $(mw_summary_key_source) · cache $((MW_SUMMARY_PERIOD / 60))m · ${tally:-nothing to do}"
 case "$tally" in
-  *no-key*) echo "    (OPENROUTER_API_KEY is not set in this shell — summaries can't be generated)" ;;
+  *no-key*) echo "    (no summary key — set MW_SUMMARY_API_KEY or OPENROUTER_API_KEY in the env Claude Code starts from)" ;;
 esac
 case "$tally" in
   *failed*) echo "    (some summary calls failed — see $MW_LOG)" ;;

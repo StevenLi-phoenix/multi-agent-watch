@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13 — Native status, configurable summary endpoint
+
+### Added
+- Rosters show each session's native busy/idle status next to its name (`name=temp-aa [busy]`) in the collision banner, the SessionStart and monitor deltas, and `/mw-status`. The status is read from Claude Code's own `<ppid>.json` registry, the same field `ListAgents` shows.
+  Files: lib/registry.sh (new `mw_native_status`, `mw_add_native_names` returns `native_status`), hooks/session-start.sh, hooks/monitor.sh, commands/mw-status.sh
+- Summary endpoint and key are configurable: `MW_SUMMARY_BASE_URL` (any OpenAI-compatible server, default OpenRouter), `MW_SUMMARY_API_KEY` (wins over `OPENROUTER_API_KEY`). `/mw-status` footer shows the endpoint host and which key source is used, never the key.
+  Files: lib/registry.sh (new `mw_summary_key`, `mw_summary_key_source`, `mw_summary_url`, `mw_summary_host`), commands/mw-status.sh, README.md
+
+### Changed
+- `MW_OPENROUTER_URL` is now an optional full-endpoint override; empty means derive from `MW_SUMMARY_BASE_URL`.
+  Files: lib/registry.sh
+- The no-key log line names both key variables.
+  Files: lib/registry.sh
+
+### Fixed
+- Endpoint lookup no longer trips `set -u` when `MW_OPENROUTER_URL` is unset.
+  Files: lib/registry.sh
+
+### Tests
+- Endpoint derivation (trailing slash, userinfo-free host display), key precedence and source, `MW_OPENROUTER_URL` override, and native busy/idle in both the fast and fallback paths. 103 checks, green under gnubin and BSD PATHs.
+  Files: tests/registry.test.sh
+
 ## [0.4.1] - 2026-11-11 — Lighter SessionStart
 
 ### Changed

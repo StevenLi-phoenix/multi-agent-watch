@@ -18,16 +18,19 @@ MW_QUIET="${MW_QUIET:-0}"
 MW_CC_SESSIONS_DIR="${MW_CC_SESSIONS_DIR:-$HOME/.claude/sessions}"
 
 # Session self-summary (so sibling sessions learn what each other is doing).
-# Generated ON READ — only when /mw-status runs — via one OpenRouter call per
-# stale session (key: $OPENROUTER_API_KEY). Nothing runs on Stop or in the
-# background.
+# Generated ON READ — only when /mw-status runs — via one OpenAI-compatible
+# chat-completions call per stale session. Endpoint: MW_SUMMARY_BASE_URL (any
+# OpenAI-compatible server; default OpenRouter). Key: MW_SUMMARY_API_KEY, falling
+# back to OPENROUTER_API_KEY. Nothing runs on Stop or in the background.
 MW_SUMMARY_MODEL="${MW_SUMMARY_MODEL:-deepseek/deepseek-v4.1-flash}"
 MW_SUMMARY_TIMEOUT="${MW_SUMMARY_TIMEOUT:-20}"
+MW_SUMMARY_BASE_URL="${MW_SUMMARY_BASE_URL:-https://openrouter.ai/api/v1}"
 # Cache: a summary younger than this many seconds (15 min) is reused as-is.
 # Past that it is regenerated only if the session's transcript changed since.
 # MW_SUMMARY_REFRESH=1 forces a regeneration regardless.
 MW_SUMMARY_PERIOD="${MW_SUMMARY_PERIOD:-900}"
-MW_OPENROUTER_URL="${MW_OPENROUTER_URL:-https://openrouter.ai/api/v1/chat/completions}"
+# Full endpoint override (tests point it at a file:// fixture). Empty = derive from the base URL.
+MW_OPENROUTER_URL="${MW_OPENROUTER_URL:-}"
 MW_SUMMARIES_DIR="$MW_STATE/summaries"   # raw API response per session
 
 mw_init() {
@@ -279,10 +282,20 @@ mw_native_name() {
     "$MW_CC_SESSIONS_DIR/$ppid.json" 2>/dev/null || true
 }
 
-# Read a JSON array of session entries on stdin; print it with .native_name
-# set on each ("" when unknown).
+# Print a session's native busy/idle status ("idle", "busy", …), or nothing.
+# Claude Code keeps it in the same <ppid>.json as the name (the field ListAgents shows).
+mw_native_status() {
+  local sid="$1" ppid
+  ppid="$(jq -r '.ppid // ""' "$MW_SESSIONS_DIR/$sid.json" 2>/dev/null)" || return 0
+  [ -n "$ppid" ] || return 0
+  jq -r --arg s "$sid" 'select(.sessionId == $s) | .status // empty' \
+    "$MW_CC_SESSIONS_DIR/$ppid.json" 2>/dev/null || true
+}
+
+# Read a JSON array of session entries on stdin; print it with .native_name and
+# .native_status set on each ("" when unknown).
 mw_add_native_names() {
-  local arr sid name names='{}' ccfiles fast
+  local arr sid name status names='{}' ccfiles fast
   arr="$(cat)"
   # Fast path: ONE jq joins the roster with every Claude Code session file (an entry's
   # ppid names <ppid>.json; its sessionId must match). Falls back to the per-session
@@ -291,13 +304,14 @@ mw_add_native_names() {
   ccfiles=("$MW_CC_SESSIONS_DIR"/*.json)
   shopt -u nullglob
   if [ "${#ccfiles[@]}" -eq 0 ]; then
-    if printf '%s' "$arr" | jq 'map(. + {native_name: ""})' 2>/dev/null; then return 0; fi
+    if printf '%s' "$arr" | jq 'map(. + {native_name: "", native_status: ""})' 2>/dev/null; then return 0; fi
   elif fast="$(jq -n --argjson arr "$arr" '
         ($arr | all(.[]; has("ppid"))) as $ok
         | if $ok | not then error("roster entry without ppid") else . end
-        | [inputs | {f: (input_filename | split("/") | last | sub("\\.json$"; "")), sid: .sessionId, name: (.name // "")}] as $cc
+        | [inputs | {f: (input_filename | split("/") | last | sub("\\.json$"; "")), sid: .sessionId, name: (.name // ""), status: (.status // "")}] as $cc
         | $arr | map(. as $e
-            | . + {native_name: ([$cc[] | select(.f == ($e.ppid | tostring) and .sid == $e.session_id) | .name] | first // "")})
+            | ([$cc[] | select(.f == ($e.ppid | tostring) and .sid == $e.session_id)] | first // {name: "", status: ""}) as $m
+            | . + {native_name: $m.name, native_status: $m.status})
       ' "${ccfiles[@]}" 2>/dev/null)"; then
     printf '%s\n' "$fast"
     return 0
@@ -305,10 +319,11 @@ mw_add_native_names() {
   while IFS= read -r sid; do
     [ -n "$sid" ] || continue
     name="$(mw_native_name "$sid")"
-    [ -n "$name" ] || continue
-    names="$(printf '%s' "$names" | jq -c --arg k "$sid" --arg v "$name" '. + {($k): $v}')"
+    status="$(mw_native_status "$sid")"
+    [ -n "$name$status" ] || continue
+    names="$(printf '%s' "$names" | jq -c --arg k "$sid" --arg v "$name" --arg s "$status" '. + {($k): {name: $v, status: $s}}')"
   done < <(printf '%s' "$arr" | jq -r '.[].session_id // empty' 2>/dev/null)
-  printf '%s' "$arr" | jq --argjson n "$names" 'map(. + {native_name: ($n[.session_id] // "")})'
+  printf '%s' "$arr" | jq --argjson n "$names" 'map(. + {native_name: ($n[.session_id].name // ""), native_status: ($n[.session_id].status // "")})'
 }
 
 # ---------------------------------------------------------------------------
@@ -449,13 +464,30 @@ mw_transcript_digest() {
   ' 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 40
 }
 
-# POST the JSON body on stdin to OpenRouter; raw response on stdout. The key
-# rides in a curl config on a pipe, so it never appears in `ps` argv. This is
-# the only function that touches the network — tests stub it, or point
+# Summary key: MW_SUMMARY_API_KEY wins, OPENROUTER_API_KEY is the fallback.
+mw_summary_key() { printf '%s' "${MW_SUMMARY_API_KEY:-${OPENROUTER_API_KEY:-}}"; }
+mw_summary_key_source() {
+  if [ -n "${MW_SUMMARY_API_KEY:-}" ]; then echo MW_SUMMARY_API_KEY
+  elif [ -n "${OPENROUTER_API_KEY:-}" ]; then echo OPENROUTER_API_KEY
+  else echo none; fi
+}
+# Full chat-completions URL: MW_OPENROUTER_URL if set, else <base>/chat/completions.
+mw_summary_url() {
+  if [ -n "${MW_OPENROUTER_URL:-}" ]; then printf '%s' "$MW_OPENROUTER_URL"
+  else printf '%s/chat/completions' "${MW_SUMMARY_BASE_URL%/}"; fi
+}
+# Host part of the endpoint for display (scheme + host, userinfo stripped, no path or key).
+mw_summary_host() {
+  mw_summary_url | sed -E 's#^([a-z]+://)[^/@]*@#\1#; s#^(https?://[^/]+).*#\1#; s#^file://.*#file://(fixture)#'
+}
+
+# POST the JSON body on stdin to the summary endpoint; raw response on stdout.
+# The key rides in a curl config on a pipe, so it never appears in `ps` argv.
+# This is the only function that touches the network — tests stub it, or point
 # MW_OPENROUTER_URL at a file:// fixture.
 mw_llm_post() {
-  curl -sS --max-time "$MW_SUMMARY_TIMEOUT" -X POST "$MW_OPENROUTER_URL" \
-    -K <(printf 'header = "Authorization: Bearer %s"\n' "$OPENROUTER_API_KEY") \
+  curl -sS --max-time "$MW_SUMMARY_TIMEOUT" -X POST "$(mw_summary_url)" \
+    -K <(printf 'header = "Authorization: Bearer %s"\n' "$(mw_summary_key)") \
     -H 'Content-Type: application/json' \
     -H 'X-Title: multi-agent-watch' \
     --data-binary @- 2>/dev/null
@@ -499,8 +531,8 @@ mw_generate_summary() {
       fi
     fi
   fi
-  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-    mw_log "summary skipped sid=$sid: OPENROUTER_API_KEY not set"
+  if [ -z "$(mw_summary_key)" ]; then
+    mw_log "summary skipped sid=$sid: no summary key (set MW_SUMMARY_API_KEY or OPENROUTER_API_KEY)"
     echo no-key; return 0
   fi
   digest="$(mw_transcript_digest "$tt" 2>/dev/null || printf '')"
