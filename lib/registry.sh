@@ -501,9 +501,10 @@ mw_summary_call() {
   local sid="$1" prompt="$2" raw="$MW_SUMMARIES_DIR/$1.json"
   jq -n --arg m "$MW_SUMMARY_MODEL" --arg p "$prompt" '{
       model: $m,
-      max_tokens: 120,
+      max_tokens: 300,
       temperature: 0.2,
       reasoning: {effort: "none"},
+      thinking: {type: "disabled"},
       provider: {sort: "latency"},
       messages: [{role: "user", content: $p}]
     }' | mw_llm_post | mw_atomic_write "$raw" || return 1

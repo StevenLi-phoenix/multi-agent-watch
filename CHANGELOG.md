@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13 — Summaries work on DeepSeek reasoning upstreams
+
+### Fixed
+- Summary calls failed with `finish_reason: length` and an empty `content` when the upstream reasoned by default: the reasoning ate the 120-token budget. Requests now send `thinking: {type: "disabled"}` (honored by the DeepSeek upstream) and `max_tokens: 300`.
+  Files: lib/registry.sh
+
+### Tests
+- The suite unsets `MW_SUMMARY_*` and `OPENROUTER_API_KEY` up front, so a developer's real endpoint or key cannot leak into the run. Checks for the `thinking` flag and the token budget. 105 checks, green under gnubin and BSD PATHs.
+  Files: tests/registry.test.sh
+
 ## [0.5.0] - 2026-11-13 — Native status, configurable summary endpoint
 
 ### Added

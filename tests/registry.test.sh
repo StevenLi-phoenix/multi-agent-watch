@@ -10,6 +10,8 @@ export MW_STATE="$TMP"
 export MW_CC_SESSIONS_DIR="$TMP/cc-sessions"   # stands in for ~/.claude/sessions
 export MW_QUIET=1          # no desktop notifications during tests
 export MW_STALE_SEC=600
+# Hermetic: a developer's real summary endpoint/key must never leak into the suite.
+unset MW_SUMMARY_API_KEY MW_SUMMARY_BASE_URL MW_SUMMARY_MODEL MW_OPENROUTER_URL OPENROUTER_API_KEY
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/registry.sh
@@ -143,6 +145,8 @@ ok "called once"              '[ "$(ncalls)" = "1" ]'
 ok "raw response saved"       'jq -e ".usage.cost" "$MW_SUMMARIES_DIR/sum-1.json" >/dev/null'
 ok "model = deepseek v4.1 flash" '[ "$(jq -r .model "$body")" = "deepseek/deepseek-v4.1-flash" ]'
 ok "reasoning disabled"       '[ "$(jq -r .reasoning.effort "$body")" = "none" ]'
+ok "deepseek upstream reasoning disabled (thinking.type)" '[ "$(jq -r .thinking.type "$body")" = "disabled" ]'
+ok "summary token budget leaves room for reasoning upstreams" '[ "$(jq -r .max_tokens "$body")" -ge 300 ]'
 ok "prompt carries digest"    'jq -r ".messages[0].content" "$body" | grep -q "registry concurrency bug"'
 
 echo "== summary: 15-minute cache =="
