@@ -94,7 +94,7 @@ network calls.
 - Single machine — sessions on other hosts won't be visible unless `MW_STATE` points at a shared volume (Tailscale fileshare, Dropbox, NFS, etc.).
 - Repo identity is `git rev-parse --show-toplevel` or absolute cwd. Sibling subdirs of one repo are treated as the same repo.
 - Subagents launched via the `Task` tool share the parent's `session_id` and don't show up as separate sessions (intentional — they aren't independent).
-- Self-summaries need a key (`MW_SUMMARY_API_KEY` or `OPENROUTER_API_KEY`) in the environment Claude Code was launched from. Without one they are skipped and collision detection still works. Set them under `env` in `~/.claude/settings.json` so every session gets them.
+- Self-summaries need a key (`MW_SUMMARY_API_KEY` or `OPENROUTER_API_KEY`) in the environment Claude Code was launched from. Without one they are skipped and collision detection still works. Export the key from your shell profile (for example `export MW_SUMMARY_API_KEY=...` in a gitignored file your `~/.zshrc` sources) rather than writing it into `env` in `~/.claude/settings.json`, which is often synced or committed; non-secret settings such as `MW_SUMMARY_BASE_URL` and `MW_SUMMARY_MODEL` can stay there.
 - Rosters show each session's native name and busy/idle status (`name=temp-aa [busy]`), read from Claude Code's own session registry (the same fields `ListAgents` shows).
 - Summaries are only as fresh as the last `/mw-status`. Banners and monitor deltas show whatever was stored by that read.
 

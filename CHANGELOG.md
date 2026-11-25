@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- README: keep `MW_SUMMARY_API_KEY` in the shell environment instead of `env` in `~/.claude/settings.json`.
+
 ## [0.5.1] - 2026-11-13 — Summaries work on DeepSeek reasoning upstreams
 
 ### Fixed
